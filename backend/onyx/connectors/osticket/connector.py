@@ -7,7 +7,6 @@ allowing users to search and retrieve ticket information.
 import time
 from collections.abc import Iterator
 from datetime import datetime
-from datetime import timezone
 from typing import Any
 
 import requests
