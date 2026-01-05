@@ -15,7 +15,12 @@ This connector integrates osTicket support tickets into Onyx, allowing users to 
 ### Prerequisites
 
 1. **osTicket Installation**: You need a running osTicket instance (v1.10+)
-2. **API Key**: Configure an API key in the osTicket admin panel:
+2. **osTicket API Extensions**: This connector requires extended API endpoints that are not available in the standard osTicket installation. You need to apply the API changes from:
+   - **osTicket PR #6890**: [feat: Add comprehensive Ticket API with filtering, pagination, and enhanced details](https://github.com/osTicket/osTicket/pull/6890)
+   
+   This PR adds the required `GET /api/tickets.json` and `GET /api/tickets/{id}.json` endpoints with pagination, filtering, and detailed thread information.
+   
+3. **API Key**: Configure an API key in the osTicket admin panel:
    - Navigate to: Admin Panel → Manage → API Keys
    - Click "Add New API Key"
    - Note the generated API key
@@ -31,10 +36,14 @@ This connector integrates osTicket support tickets into Onyx, allowing users to 
 
 ## API Endpoints Used
 
-This connector uses the following osTicket API endpoints:
+This connector uses the following osTicket API endpoints (added by PR #6890):
 
-- `GET /api/tickets.json` - List tickets with pagination
-- `GET /api/tickets/{id}.json` - Get detailed ticket information
+- `GET /api/tickets.json` - List tickets with pagination and status filtering
+  - Query parameters: `page`, `per_page`, `status`, `state`, `order`
+  - Returns: `{ tickets: [...], pagination: {...} }`
+  
+- `GET /api/tickets/{id}.json` - Get detailed ticket information including thread
+  - Returns: ticket details with `thread` array containing all messages/responses
 
 ## Thread Entry Types
 
