@@ -81,6 +81,7 @@ import zAIIcon from "@public/Z_AI.png";
 import zendeskIcon from "@public/Zendesk.svg";
 import zulipIcon from "@public/Zulip.png";
 import testrailSVG from "@public/Testrail.svg";
+import osticketSVG from "@public/OsTicket.svg";
 import gitlabIcon from "@public/Gitlab.png";
 import gmailIcon from "@public/Gmail.png";
 import googleDriveIcon from "@public/GoogleDrive.png";
@@ -876,6 +877,7 @@ export const NotionIcon = createLogoIcon(notionIcon, { monochromatic: true });
 export const OCIStorageIcon = createLogoIcon(OCIStorageSVG);
 export const OllamaIcon = createLogoIcon(ollamaIcon);
 export const TestRailIcon = createLogoIcon(testrailSVG);
+export const OsTicketIcon = createLogoIcon(osticketSVG);
 export const OpenAIISVG = ({
   size = 16,
   className = defaultTailwindCSS,

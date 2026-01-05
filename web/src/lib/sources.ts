@@ -47,6 +47,7 @@ import {
   DrupalWikiIcon,
   EmailIcon,
   TestRailIcon,
+  OsTicketIcon,
 } from "@/components/icons/icons";
 import { ValidSources } from "./types";
 import { SourceCategory, SourceMetadata } from "./search/interfaces";
@@ -283,6 +284,11 @@ export const SOURCE_METADATA_MAP: SourceMap = {
   testrail: {
     icon: TestRailIcon,
     displayName: "TestRail",
+    category: SourceCategory.TicketingAndTaskManagement,
+  },
+  osticket: {
+    icon: OsTicketIcon,
+    displayName: "osTicket",
     category: SourceCategory.TicketingAndTaskManagement,
   },
 

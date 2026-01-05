@@ -505,6 +505,7 @@ export enum ValidSources {
   Imap = "imap",
   Bitbucket = "bitbucket",
   TestRail = "testrail",
+  OsTicket = "osticket",
 
   // Federated Connectors
   FederatedSlack = "federated_slack",

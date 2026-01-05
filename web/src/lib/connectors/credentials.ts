@@ -244,6 +244,10 @@ export interface FreshdeskCredentialJson {
   freshdesk_api_key: string;
 }
 
+export interface OsTicketCredentialJson {
+  osticket_api_key: string;
+}
+
 export interface FirefliesCredentialJson {
   fireflies_api_key: string;
 }
@@ -442,6 +446,9 @@ export const credentialTemplates: Record<ValidSources, any> = {
     freshdesk_domain: "",
     freshdesk_api_key: "",
   } as FreshdeskCredentialJson,
+  osticket: {
+    osticket_api_key: "",
+  } as OsTicketCredentialJson,
   fireflies: {
     fireflies_api_key: "",
   } as FirefliesCredentialJson,
@@ -635,6 +642,9 @@ export const credentialDisplayNames: Record<string, string> = {
   // Freshdesk
   freshdesk_domain: "Freshdesk Domain",
   freshdesk_api_key: "Freshdesk API Key",
+
+  // osTicket
+  osticket_api_key: "osTicket API Key",
 
   // Fireflies
   fireflies_api_key: "Fireflies API Key",

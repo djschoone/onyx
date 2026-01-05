@@ -1532,6 +1532,48 @@ For example, specifying .*-support.* as a "channel" will cause the connector to 
     values: [],
     advanced_values: [],
   },
+  osticket: {
+    description: "Configure osTicket connector",
+    subtext:
+      "Connect to your osTicket installation to index support tickets for AI-powered search.",
+    values: [
+      {
+        type: "text",
+        label: "osTicket URL",
+        name: "osticket_url",
+        optional: false,
+        description:
+          "The base URL of your osTicket installation (e.g., https://support.example.com)",
+      },
+      {
+        type: "checkbox",
+        label: "Include Closed Tickets",
+        name: "include_closed",
+        optional: true,
+        default: false,
+        description:
+          "When enabled, closed tickets will also be indexed. By default, only open tickets are indexed.",
+      },
+    ],
+    advanced_values: [
+      {
+        type: "number",
+        label: "Batch Size",
+        name: "batch_size",
+        optional: true,
+        description:
+          "Number of tickets to fetch per API request (default: 100, max: 100)",
+      },
+      {
+        type: "number",
+        label: "API Calls per Minute",
+        name: "calls_per_minute",
+        optional: true,
+        description:
+          "Rate limit for API calls. Leave empty for unlimited.",
+      },
+    ],
+  },
   fireflies: {
     description: "Configure Fireflies connector",
     values: [],
@@ -2000,6 +2042,13 @@ export interface AsanaConfig {
 export interface FreshdeskConfig {}
 
 export interface FirefliesConfig {}
+
+export interface OsTicketConfig {
+  osticket_url: string;
+  include_closed?: boolean;
+  batch_size?: number;
+  calls_per_minute?: number;
+}
 
 export interface MediaWikiConfig extends MediaWikiBaseConfig {
   hostname: string;
