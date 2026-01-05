@@ -9,7 +9,6 @@ This connector integrates osTicket support tickets into Onyx, allowing users to 
 - Includes full ticket thread/conversation history
 - Extracts metadata including ticket number, status, department, and user information
 - Rate limiting support to respect API limits
-- Incremental updates support
 
 ## Configuration
 
@@ -36,6 +35,16 @@ This connector uses the following osTicket API endpoints:
 
 - `GET /api/tickets.json` - List tickets with pagination
 - `GET /api/tickets/{id}.json` - Get detailed ticket information
+
+## Thread Entry Types
+
+The connector processes the following thread entry types from the API:
+
+| Code | Type | Description |
+|------|------|-------------|
+| `M` | Customer Message | Messages sent by the ticket creator |
+| `R` | Staff Response | Responses from support staff |
+| `N` | Internal Note | Notes visible only to staff |
 
 ## Document Structure
 
@@ -78,8 +87,14 @@ connector.load_credentials({
 # Validate connection
 connector.validate_connector_settings()
 
-# Poll for documents
-for documents in connector.poll_source(start=None, end=None):
+# Load all tickets (full indexing)
+for documents in connector.load_from_state():
+    print(f"Fetched {len(documents)} tickets")
+
+# Or use poll_source for scheduled updates
+# Note: osTicket API does not support time-based filtering,
+# so all tickets are fetched on each poll
+for documents in connector.poll_source(start=0, end=0):
     print(f"Fetched {len(documents)} tickets")
 ```
 
@@ -101,9 +116,8 @@ for documents in connector.poll_source(start=None, end=None):
 
 If you encounter rate limiting issues, configure the `calls_per_minute` parameter to a lower value.
 
-## Notes
+## Limitations
 
-- The connector currently fetches all tickets on each run (no incremental updates based on time)
-- Large ticket volumes may take time to index initially
-- Attachments are not currently downloaded, but attachment URLs are preserved in the ticket thread
-
+- **No incremental updates**: osTicket's API does not support filtering by update time, so all tickets are fetched on each indexing run. For large installations, consider using `include_closed=False` to limit the dataset.
+- **No attachment content**: Attachments are not downloaded. Attachment metadata is available in the thread entries, and URLs can be accessed via the `/api/attachments/{id}/url.json` endpoint.
+- **Staff panel URLs**: Document links point to the staff control panel (`/scp/tickets.php`), which requires staff authentication.
