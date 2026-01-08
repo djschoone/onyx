@@ -40,6 +40,7 @@ logger = setup_logger()
 
 # Constants
 MAX_TICKETS_PER_PAGE = 100  # osTicket API supports up to 200
+DEFAULT_CALLS_PER_MINUTE = 30  # Conservative default: ~0.5 requests per second
 
 # Thread entry type mapping from API codes to human-readable names
 _ENTRY_TYPE_MAP: dict[str, str] = {
@@ -64,17 +65,17 @@ class OsTicketClient:
             "X-API-Key": api_key,
             "Content-Type": "application/json",
         }
-        self.make_request = self._request_with_rate_limit(calls_per_minute)
+        # Use default if not specified to prevent API overload
+        effective_calls_per_minute = (
+            calls_per_minute if calls_per_minute is not None else DEFAULT_CALLS_PER_MINUTE
+        )
+        self.make_request = self._request_with_rate_limit(effective_calls_per_minute)
 
     def _request_with_rate_limit(
-        self, max_calls_per_minute: int | None = None
+        self, max_calls_per_minute: int
     ) -> Any:
         @retry_builder()
-        @(
-            rate_limit_builder(max_calls=max_calls_per_minute, period=60)
-            if max_calls_per_minute
-            else lambda x: x
-        )
+        @rate_limit_builder(max_calls=max_calls_per_minute, period=60)
         def make_request(
             endpoint: str,
             params: dict[str, Any] | None = None,
@@ -391,12 +392,15 @@ class OsTicketConnector(PollConnector, LoadConnector):
             osticket_url: Base URL of the osTicket installation
             batch_size: Number of tickets to fetch per API request
             include_closed: Whether to include closed tickets
-            calls_per_minute: Rate limit for API calls (None for unlimited)
+            calls_per_minute: Rate limit for API calls (default: 30 per minute)
         """
         self.osticket_url = osticket_url.rstrip("/")
         self.batch_size = min(batch_size, MAX_TICKETS_PER_PAGE)
         self.include_closed = include_closed
-        self.calls_per_minute = calls_per_minute
+        # Use default if not specified to prevent API overload
+        self.calls_per_minute = (
+            calls_per_minute if calls_per_minute is not None else DEFAULT_CALLS_PER_MINUTE
+        )
         self.client: OsTicketClient | None = None
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:

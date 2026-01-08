@@ -32,7 +32,7 @@ This connector integrates osTicket support tickets into Onyx, allowing users to 
 - **API Key**: The API key generated in osTicket admin panel
 - **Include Closed Tickets**: Whether to index closed tickets (default: `false`)
 - **Batch Size**: Number of tickets to fetch per API request (max: 100, default: 100)
-- **Calls Per Minute**: Optional rate limiting (default: unlimited)
+- **Calls Per Minute**: Rate limiting for API calls (default: 30 per minute, ~0.5 requests/second)
 
 ## API Endpoints Used
 
