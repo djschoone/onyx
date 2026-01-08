@@ -205,16 +205,40 @@ def _get_author_name(entry: dict[str, Any]) -> str:
     The API returns author information in the 'author' field with structure:
     {
         "type": "staff" | "user" | "guest",
-        "name": "Author Name"
+        "name": "Author Name" | {"format": "legal", "parts": {...}, "name": "Actual Name"}
     }
     Falls back to 'poster' field for backwards compatibility.
     """
     author_info = entry.get("author", {})
     if isinstance(author_info, dict):
-        return author_info.get("name", "Unknown")
+        name_value = author_info.get("name", "Unknown")
+        # osTicket API may return name as a dict with structure like:
+        # {"format": "legal", "parts": {...}, "name": "Actual Name"}
+        if isinstance(name_value, dict):
+            # Try to get name from various possible keys
+            author_name = (
+                name_value.get("name")
+                or name_value.get("display")
+                or name_value.get("full")
+            )
+            # If name is in parts, try to extract it
+            if author_name is None and isinstance(name_value.get("parts"), dict):
+                parts = name_value.get("parts", {})
+                author_name = parts.get("name") or parts.get("display")
+            # Ensure we have a string, not a dict
+            if isinstance(author_name, str):
+                return author_name
+            return "Unknown"
+        elif isinstance(name_value, str):
+            return name_value
+        return "Unknown"
 
     # Fallback to poster field
-    return entry.get("poster", "Unknown")
+    poster_value = entry.get("poster", "Unknown")
+    # Ensure poster is also a string, not a dict
+    if isinstance(poster_value, str):
+        return poster_value
+    return "Unknown"
 
 
 def _get_entry_type_name(entry: dict[str, Any]) -> str:
@@ -324,7 +348,29 @@ def _convert_ticket_to_document(
     user_name: str | None = None
     if isinstance(user_info, dict) and user_info:
         user_email = user_info.get("email")
-        user_name = user_info.get("name")
+        name_value = user_info.get("name")
+        # osTicket API may return name as a dict with structure like:
+        # {"format": "legal", "parts": {...}, "name": "Actual Name"}
+        # or the name might be in parts or other keys
+        if isinstance(name_value, dict):
+            # Try to get name from various possible keys
+            user_name = (
+                name_value.get("name")
+                or name_value.get("display")
+                or name_value.get("full")
+            )
+            # If name is in parts, try to extract it
+            if user_name is None and isinstance(name_value.get("parts"), dict):
+                parts = name_value.get("parts", {})
+                user_name = parts.get("name") or parts.get("display")
+            # Ensure we have a string, not a dict
+            if not isinstance(user_name, str):
+                user_name = None
+        elif isinstance(name_value, str):
+            user_name = name_value
+        # Ensure user_name is never a dict
+        if not isinstance(user_name, (str, type(None))):
+            user_name = None
 
     # Parse datetime
     created_at = _parse_osticket_datetime(ticket.get("created"))
