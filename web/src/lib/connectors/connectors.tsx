@@ -1554,6 +1554,14 @@ For example, specifying .*-support.* as a "channel" will cause the connector to 
         description:
           "When enabled, closed tickets will also be indexed. By default, only open tickets are indexed.",
       },
+      {
+        type: "number",
+        label: "API Calls per Minute",
+        name: "calls_per_minute",
+        optional: true,
+        description:
+          "Rate limit for API calls (default: 30 per minute, ~0.5 requests/second). Leave empty to use the default.",
+      },
     ],
     advanced_values: [
       {
@@ -1563,14 +1571,6 @@ For example, specifying .*-support.* as a "channel" will cause the connector to 
         optional: true,
         description:
           "Number of tickets to fetch per API request (default: 100, max: 100)",
-      },
-      {
-        type: "number",
-        label: "API Calls per Minute",
-        name: "calls_per_minute",
-        optional: true,
-        description:
-          "Rate limit for API calls. Leave empty for unlimited.",
       },
     ],
   },
