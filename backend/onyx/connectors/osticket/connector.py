@@ -6,7 +6,7 @@ allowing users to search and retrieve ticket information.
 
 import time
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -137,6 +137,7 @@ def _get_ticket_list(
     page: int = 1,
     per_page: int = MAX_TICKETS_PER_PAGE,
     status: str | None = None,
+    updated_since: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], OsTicketPaginationInfo]:
     """Fetch a page of tickets from osTicket API."""
     params: dict[str, Any] = {
@@ -146,6 +147,10 @@ def _get_ticket_list(
 
     if status:
         params["status"] = status
+
+    if updated_since:
+        # osTicket API accepts ISO 8601 format
+        params["updated_since"] = updated_since.isoformat()
 
     try:
         data = client.make_request("tickets.json", params=params)
@@ -372,8 +377,12 @@ def _convert_ticket_to_document(
         if not isinstance(user_name, (str, type(None))):
             user_name = None
 
-    # Parse datetime
+    # Parse datetime - prefer updated over created for doc_updated_at
+    # Note: updated can be null for older tickets without update history
+    updated_at = _parse_osticket_datetime(ticket.get("updated"))
     created_at = _parse_osticket_datetime(ticket.get("created"))
+    # Use updated_at if available, otherwise fall back to created_at
+    doc_updated_at = updated_at if updated_at else created_at
 
     # Build metadata
     metadata: dict[str, str | list[str]] = {
@@ -389,6 +398,8 @@ def _convert_ticket_to_document(
         metadata["user_name"] = user_name
     if ticket.get("created"):
         metadata["created"] = ticket["created"]
+    if ticket.get("updated"):
+        metadata["updated"] = ticket["updated"]
 
     # Create expert info if we have user details
     primary_owners: list[BasicExpertInfo] = []
@@ -406,7 +417,7 @@ def _convert_ticket_to_document(
         sections=sections,
         source=DocumentSource.OSTICKET,
         semantic_identifier=f"Ticket #{ticket_number}: {subject}",
-        doc_updated_at=created_at,
+        doc_updated_at=doc_updated_at,
         primary_owners=primary_owners if primary_owners else None,
         metadata=metadata,
     )
@@ -420,9 +431,9 @@ class OsTicketConnector(PollConnector, LoadConnector):
     This connector fetches tickets from an osTicket installation via its REST API
     and converts them to Onyx documents for indexing and search.
 
-    Note: osTicket's API does not support filtering by update time, so all tickets
-    are fetched on each poll. For large installations, consider using the
-    include_closed=False option to limit the dataset.
+    The connector supports incremental syncing using the updated_since parameter,
+    which filters tickets by their last update time. When updated_since is used,
+    the API automatically sorts results by updated date (most recent first).
     """
 
     def __init__(
@@ -488,8 +499,14 @@ class OsTicketConnector(PollConnector, LoadConnector):
 
     def _fetch_tickets(
         self,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> Iterator[list[dict[str, Any]]]:
-        """Fetch all tickets from osTicket with pagination.
+        """Fetch tickets from osTicket with pagination and optional time filtering.
+
+        Args:
+            start: Only fetch tickets updated since this datetime
+            end: Not currently used (kept for interface compatibility)
 
         Yields:
             Lists of ticket dictionaries
@@ -509,6 +526,7 @@ class OsTicketConnector(PollConnector, LoadConnector):
                 page=page,
                 per_page=self.batch_size,
                 status=status_filter,
+                updated_since=start,
             )
 
             if not tickets:
@@ -523,8 +541,14 @@ class OsTicketConnector(PollConnector, LoadConnector):
 
             page += 1
 
-    def _process_tickets(self) -> GenerateDocumentsOutput:
+    def _process_tickets(
+        self, start: datetime | None = None, end: datetime | None = None
+    ) -> GenerateDocumentsOutput:
         """Process tickets and convert to documents.
+
+        Args:
+            start: Only process tickets updated since this datetime
+            end: Not currently used (kept for interface compatibility)
 
         Yields:
             Lists of Document objects
@@ -535,7 +559,7 @@ class OsTicketConnector(PollConnector, LoadConnector):
         total_processed = 0
         doc_batch: list[Document] = []
 
-        for ticket_batch in self._fetch_tickets():
+        for ticket_batch in self._fetch_tickets(start, end):
             for ticket in ticket_batch:
                 try:
                     doc = _convert_ticket_to_document(
@@ -575,22 +599,24 @@ class OsTicketConnector(PollConnector, LoadConnector):
     def poll_source(
         self, start: SecondsSinceUnixEpoch, end: SecondsSinceUnixEpoch
     ) -> GenerateDocumentsOutput:
-        """Poll osTicket for tickets.
+        """Poll osTicket for tickets updated within a time range.
 
-        Note: osTicket's API does not support filtering by update time,
-        so this method fetches all tickets regardless of the time range.
-        The start and end parameters are accepted for interface compatibility
-        but are not used.
+        Uses the updated_since parameter to fetch only tickets that have been
+        updated since the start time. The API automatically sorts results by
+        updated date (most recent first) when updated_since is used.
 
         Args:
-            start: Start time (not used - kept for interface compatibility)
-            end: End time (not used - kept for interface compatibility)
+            start: Start time (Unix timestamp) - only tickets updated since this time
+            end: End time (Unix timestamp) - not currently used by API
 
         Yields:
             Lists of Document objects
         """
+        start_datetime = datetime.fromtimestamp(start, tz=timezone.utc)
+        end_datetime = datetime.fromtimestamp(end, tz=timezone.utc)
+
         logger.info(
             f"Polling osTicket at {self.osticket_url} "
-            f"(note: time filtering not supported by API)"
+            f"for tickets updated since {start_datetime.isoformat()}"
         )
-        yield from self._process_tickets()
+        yield from self._process_tickets(start_datetime, end_datetime)
