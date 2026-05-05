@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import cast
 
 import pytz
-import timeago  # type: ignore
+import timeago
 from slack_sdk.models.blocks import ActionsBlock
 from slack_sdk.models.blocks import Block
 from slack_sdk.models.blocks import ButtonElement
@@ -124,7 +124,7 @@ def _build_qa_feedback_block(
 
 
 def _build_ephemeral_publication_block(
-    channel_id: str,
+    channel_id: str,  # noqa: ARG001
     chat_message_id: int,
     message_info: SlackMessageInfo,
     original_question_ts: str,
@@ -592,11 +592,8 @@ def build_slack_response_blocks(
         )
 
     citations_blocks = []
-    document_blocks = []
     if answer.citation_info:
         citations_blocks = _build_citations_blocks(answer)
-    else:
-        document_blocks = _priority_ordered_documents_blocks(answer)
 
     citations_divider = [DividerBlock()] if citations_blocks else []
     buttons_divider = [DividerBlock()] if web_follow_up_block or follow_up_block else []
@@ -608,7 +605,6 @@ def build_slack_response_blocks(
         + ai_feedback_block
         + citations_divider
         + citations_blocks
-        + document_blocks
         + buttons_divider
         + web_follow_up_block
         + follow_up_block

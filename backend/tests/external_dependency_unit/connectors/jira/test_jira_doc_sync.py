@@ -1,5 +1,6 @@
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -14,12 +15,12 @@ from onyx.db.models import ConnectorCredentialPair
 from onyx.db.models import Credential
 from onyx.db.utils import DocumentRow
 from onyx.db.utils import SortOrder
-from onyx.utils.variable_functionality import global_version
-
 
 # In order to get these tests to run, use the credentials from Bitwarden.
 # Search up "ENV vars for local and Github tests", and find the Jira relevant key-value pairs.
 # Required env vars: JIRA_USER_EMAIL, JIRA_API_TOKEN
+
+pytestmark = pytest.mark.usefixtures("enable_ee")
 
 
 class DocExternalAccessSet(BaseModel):
@@ -52,9 +53,6 @@ def test_jira_doc_sync(
     This test uses the AS project which has applicationRole permission,
     meaning all documents should be marked as public.
     """
-    # NOTE: must set EE on or else the connector will skip the perm syncing
-    global_version.set_ee()
-
     try:
         # Use AS project specifically for this test
         connector_config = {
@@ -80,6 +78,8 @@ def test_jira_doc_sync(
         )
         db_session.add(credential)
         db_session.flush()
+        # Expire the credential so it reloads from DB with SensitiveValue wrapper
+        db_session.expire(credential)
 
         cc_pair = ConnectorCredentialPair(
             connector_id=connector.id,
@@ -95,7 +95,7 @@ def test_jira_doc_sync(
 
         # Mock functions - we don't have existing docs in the test DB
         def fetch_all_existing_docs_fn(
-            sort_order: SortOrder | None = None,
+            sort_order: SortOrder | None = None,  # noqa: ARG001
         ) -> list[DocumentRow]:
             return []
 
@@ -129,10 +129,11 @@ def test_jira_doc_sync(
         actual_docs = {
             doc.doc_id: DocExternalAccessSet.from_doc_external_access(doc)
             for doc in doc_sync_iter
+            if isinstance(doc, DocExternalAccess)
         }
-        assert expected_docs == actual_docs, (
-            f"Expected docs: {expected_docs}\n" f"Actual docs: {actual_docs}"
-        )
+        assert (
+            expected_docs == actual_docs
+        ), f"Expected docs: {expected_docs}\nActual docs: {actual_docs}"
     finally:
         db_session.rollback()
 
@@ -147,9 +148,6 @@ def test_jira_doc_sync_with_specific_permissions(
     This test uses a project that has specific user permissions to verify
     that specific users are correctly extracted.
     """
-    # NOTE: must set EE on or else the connector will skip the perm syncing
-    global_version.set_ee()
-
     try:
         # Use SUP project which has specific user permissions
         connector_config = {
@@ -175,6 +173,8 @@ def test_jira_doc_sync_with_specific_permissions(
         )
         db_session.add(credential)
         db_session.flush()
+        # Expire the credential so it reloads from DB with SensitiveValue wrapper
+        db_session.expire(credential)
 
         cc_pair = ConnectorCredentialPair(
             connector_id=connector.id,
@@ -190,7 +190,7 @@ def test_jira_doc_sync_with_specific_permissions(
 
         # Mock functions
         def fetch_all_existing_docs_fn(
-            sort_order: SortOrder | None = None,
+            sort_order: SortOrder | None = None,  # noqa: ARG001
         ) -> list[DocumentRow]:
             return []
 
@@ -209,11 +209,13 @@ def test_jira_doc_sync_with_specific_permissions(
         assert len(docs) > 0, "Expected at least one document from SUP project"
 
         _EXPECTED_USER_EMAILS = set(
-            ["yuhong@onyx.app", "chris@onyx.app", "founders@onyx.app"]
+            ["yuhong@onyx.app", "chris@onyx.app", "founders@onyx.app", "oauth@onyx.app"]
         )
         _EXPECTED_USER_GROUP_IDS = set(["jira-users-danswerai"])
 
         for doc in docs:
+            if not isinstance(doc, DocExternalAccess):
+                continue
             assert doc.doc_id.startswith("https://danswerai.atlassian.net/browse/SUP-")
             # SUP project has specific users assigned, not applicationRole
             assert (

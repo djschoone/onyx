@@ -10,14 +10,11 @@ from pydantic import BaseModel
 from requests.exceptions import HTTPError
 from typing_extensions import override
 
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.app_configs import ZENDESK_CONNECTOR_SKIP_ARTICLE_LABELS
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.cross_connector_utils.miscellaneous_utils import (
-    time_str_to_utc,
-)
-from onyx.connectors.cross_connector_utils.rate_limit_wrapper import (
-    rate_limit_builder,
-)
+from onyx.connectors.cross_connector_utils.miscellaneous_utils import time_str_to_utc
+from onyx.connectors.cross_connector_utils.rate_limit_wrapper import rate_limit_builder
 from onyx.connectors.exceptions import ConnectorValidationError
 from onyx.connectors.exceptions import CredentialExpiredError
 from onyx.connectors.exceptions import InsufficientPermissionsError
@@ -31,12 +28,12 @@ from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorCheckpoint
 from onyx.connectors.models import Document
 from onyx.connectors.models import DocumentFailure
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import SlimDocument
 from onyx.connectors.models import TextSection
 from onyx.file_processing.html_utils import parse_html_page_basic
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.retry_wrapper import retry_builder
-
 
 MAX_PAGE_SIZE = 30  # Zendesk API maximum
 MAX_AUTHOR_MAP_SIZE = 50_000  # Reset author map cache if it gets too large
@@ -74,7 +71,10 @@ def request_with_rate_limit(
     )
     def make_request(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
         response = requests.get(
-            f"{client.base_url}/{endpoint}", auth=client.auth, params=params
+            f"{client.base_url}/{endpoint}",
+            auth=client.auth,
+            params=params,
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
 
         if response.status_code == 429:
@@ -568,10 +568,10 @@ class ZendeskConnector(
     def retrieve_all_slim_docs_perm_sync(
         self,
         start: SecondsSinceUnixEpoch | None = None,
-        end: SecondsSinceUnixEpoch | None = None,
-        callback: IndexingHeartbeatInterface | None = None,
+        end: SecondsSinceUnixEpoch | None = None,  # noqa: ARG002
+        callback: IndexingHeartbeatInterface | None = None,  # noqa: ARG002
     ) -> GenerateSlimDocumentOutput:
-        slim_doc_batch: list[SlimDocument] = []
+        slim_doc_batch: list[SlimDocument | HierarchyNode] = []
         if self.content_type == "articles":
             articles = _get_articles(
                 self.client, start_time=int(start) if start else None

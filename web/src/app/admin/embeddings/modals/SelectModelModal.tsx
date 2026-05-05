@@ -1,7 +1,8 @@
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import Text from "@/refresh-components/texts/Text";
 import { CloudEmbeddingModel } from "@/components/embedding/interfaces";
+import { markdown } from "@opal/utils";
 import { SvgServer } from "@opal/icons";
 
 export interface SelectModelModalProps {
@@ -17,10 +18,10 @@ export default function SelectModelModal({
 }: SelectModelModalProps) {
   return (
     <Modal open onOpenChange={onCancel}>
-      <Modal.Content small>
+      <Modal.Content width="sm" height="sm">
         <Modal.Header
           icon={SvgServer}
-          title={`Select ${model.model_name}`}
+          title={markdown(`Select *${model.model_name}*`)}
           onClose={onCancel}
         />
         <Modal.Body>
@@ -30,9 +31,9 @@ export default function SelectModelModal({
             you will need to undergo a complete re-indexing. Are you sure?
           </Text>
         </Modal.Body>
-        <Modal.Footer className="p-4 gap-2 justify-end">
+        <Modal.Footer>
           <Button onClick={onConfirm}>Confirm</Button>
-          <Button secondary onClick={onCancel}>
+          <Button prominence="secondary" onClick={onCancel}>
             Cancel
           </Button>
         </Modal.Footer>

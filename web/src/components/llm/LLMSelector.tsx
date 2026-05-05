@@ -1,32 +1,29 @@
+"use client";
+
 import { useMemo } from "react";
-import {
-  parseLlmDescriptor,
-  modelSupportsImageInput,
-  structureValue,
-} from "@/lib/llm/utils";
-import {
-  LLMProviderDescriptor,
-  ModelConfiguration,
-} from "@/app/admin/configuration/llm/interfaces";
-import { getProviderIcon } from "@/app/admin/configuration/llm/utils";
+import { parseLlmDescriptor, structureValue } from "@/lib/llmConfig/utils";
+import { DefaultModel, LLMProviderDescriptor } from "@/interfaces/llm";
+import { getModelIcon } from "@/lib/llmConfig";
 import InputSelect from "@/refresh-components/inputs/InputSelect";
 import { createIcon } from "@/components/icons/icons";
 
 interface LLMOption {
   name: string;
   value: string;
-  icon: ReturnType<typeof getProviderIcon>;
+  icon: ReturnType<typeof getModelIcon>;
   modelName: string;
+  providerId: number;
   providerName: string;
   provider: string;
-  providerDisplayName: string;
   supportsImageInput: boolean;
   vendor: string | null;
 }
 
 export interface LLMSelectorProps {
+  name?: string;
   userSettings?: boolean;
   llmProviders: LLMProviderDescriptor[];
+  defaultText?: DefaultModel | null;
   currentLlm: string | null;
   onSelect: (value: string | null) => void;
   requiresImageGeneration?: boolean;
@@ -34,8 +31,10 @@ export interface LLMSelectorProps {
 }
 
 export default function LLMSelector({
+  name,
   userSettings,
   llmProviders,
+  defaultText,
   currentLlm,
   onSelect,
   requiresImageGeneration,
@@ -65,7 +64,7 @@ export default function LLMSelector({
           return;
         }
 
-        const key = `${provider.provider}:${modelConfiguration.name}`;
+        const key = `${provider.id}:${modelConfiguration.name}`;
         if (seenKeys.has(key)) {
           return; // Skip exact duplicate
         }
@@ -86,12 +85,11 @@ export default function LLMSelector({
             provider.provider,
             modelConfiguration.name
           ),
-          icon: getProviderIcon(provider.provider, modelConfiguration.name),
+          icon: getModelIcon(provider.provider, modelConfiguration.name),
           modelName: modelConfiguration.name,
+          providerId: provider.id,
           providerName: provider.name,
           provider: provider.provider,
-          providerDisplayName:
-            provider.provider_display_name || provider.provider,
           supportsImageInput,
           vendor: modelConfiguration.vendor || null,
         };
@@ -109,44 +107,45 @@ export default function LLMSelector({
     requiresImageGeneration,
   ]);
 
-  // Group options by provider using backend-provided display names
+  // Group options by configured provider instance so multiple instances of the
+  // same provider type (e.g., two Anthropic API keys) appear as separate groups
+  // labeled with their user-given names.
   const groupedOptions = useMemo(() => {
     const groups = new Map<
-      string,
+      number,
       { displayName: string; options: LLMOption[] }
     >();
 
     llmOptions.forEach((option) => {
-      const provider = option.provider.toLowerCase();
-      if (!groups.has(provider)) {
-        groups.set(provider, {
-          displayName: option.providerDisplayName,
+      if (!groups.has(option.providerId)) {
+        groups.set(option.providerId, {
+          displayName: option.providerName,
           options: [],
         });
       }
-      groups.get(provider)!.options.push(option);
+      groups.get(option.providerId)!.options.push(option);
     });
 
     // Sort groups alphabetically by display name
-    const sortedProviders = Array.from(groups.keys()).sort((a, b) =>
+    const sortedProviderIds = Array.from(groups.keys()).sort((a, b) =>
       groups.get(a)!.displayName.localeCompare(groups.get(b)!.displayName)
     );
 
-    return sortedProviders.map((provider) => {
-      const group = groups.get(provider)!;
+    return sortedProviderIds.map((providerId) => {
+      const group = groups.get(providerId)!;
       return {
-        provider,
+        providerId,
         displayName: group.displayName,
         options: group.options,
       };
     });
   }, [llmOptions]);
 
-  const defaultProvider = llmProviders.find(
-    (llmProvider) => llmProvider.is_default_provider
-  );
+  const defaultProvider = defaultText
+    ? llmProviders.find((p) => p.id === defaultText.provider_id)
+    : undefined;
 
-  const defaultModelName = defaultProvider?.default_model_name;
+  const defaultModelName = defaultText?.model_name;
   const defaultModelConfig = defaultProvider?.model_configurations.find(
     (m) => m.name === defaultModelName
   );
@@ -163,9 +162,9 @@ export default function LLMSelector({
       value={currentLlm ? currentLlm : "default"}
       onValueChange={(value) => onSelect(value === "default" ? null : value)}
     >
-      <InputSelect.Trigger placeholder={defaultLabel} />
+      <InputSelect.Trigger id={name} name={name} placeholder={defaultLabel} />
 
-      <InputSelect.Content className="min-w-[280px]">
+      <InputSelect.Content>
         {!excludePublicProviders && (
           <InputSelect.Item
             value="default"
@@ -180,7 +179,7 @@ export default function LLMSelector({
         )}
         {showGrouped
           ? groupedOptions.map((group) => (
-              <InputSelect.Group key={group.provider}>
+              <InputSelect.Group key={group.providerId}>
                 <InputSelect.Label>{group.displayName}</InputSelect.Label>
                 {group.options.map((option) => (
                   <InputSelect.Item

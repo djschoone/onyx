@@ -1,16 +1,15 @@
 "use client";
 
 import React from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import Text from "@/refresh-components/texts/Text";
-import IconButton from "@/refresh-components/buttons/IconButton";
-import FadeDiv from "@/components/FadeDiv";
+import { Button } from "@opal/components";
+import FadingEdgeContainer from "@/refresh-components/FadingEdgeContainer";
 import ToolItemSkeleton from "@/sections/actions/skeleton/ToolItemSkeleton";
 import EnabledCount from "@/refresh-components/EnabledCount";
 import { SvgEye, SvgXCircle } from "@opal/icons";
-import Button from "@/refresh-components/buttons/Button";
 
-interface ToolsListProps {
+export interface ToolsListProps {
   // Loading state
   isFetching?: boolean;
 
@@ -57,19 +56,18 @@ const ToolsList: React.FC<ToolsListProps> = ({
 
   return (
     <>
-      <div
+      <FadingEdgeContainer
+        direction="bottom"
         className={cn(
-          "flex flex-col gap-1 items-start max-h-[30vh] overflow-y-auto w-full",
+          "flex flex-col gap-1 items-start max-h-[30vh] overflow-y-auto",
           className
         )}
       >
         {isFetching ? (
-          // Show 5 skeleton items while loading
           Array.from({ length: 5 }).map((_, index) => (
             <ToolItemSkeleton key={`skeleton-${index}`} />
           ))
         ) : isEmpty ? (
-          // Empty state
           <div className="flex items-center justify-center w-full py-8">
             <Text as="p" text03 mainUiBody>
               {searchQuery ? emptySearchMessage : emptyMessage}
@@ -78,11 +76,11 @@ const ToolsList: React.FC<ToolsListProps> = ({
         ) : (
           children
         )}
-      </div>
+      </FadingEdgeContainer>
 
       {/* Footer showing enabled tool count with filter toggle */}
       {showFooter && !(totalCount === 0) && !isFetching && (
-        <FadeDiv>
+        <div className="pt-2 px-2">
           <div className="flex items-center justify-between gap-2 w-full">
             {/* Left action area */}
             {leftAction}
@@ -97,11 +95,12 @@ const ToolsList: React.FC<ToolsListProps> = ({
                 />
               )}
               {onToggleShowOnlyEnabled && enabledCount > 0 && (
-                <IconButton
+                <Button
                   icon={SvgEye}
-                  internal
+                  prominence="tertiary"
+                  size="sm"
                   onClick={onToggleShowOnlyEnabled}
-                  className={showOnlyEnabled ? "bg-background-tint-02" : ""}
+                  interaction={showOnlyEnabled ? "hover" : "rest"}
                   tooltip={
                     showOnlyEnabled ? "Show all tools" : "Show only enabled"
                   }
@@ -113,26 +112,30 @@ const ToolsList: React.FC<ToolsListProps> = ({
                 />
               )}
               {onUpdateToolsStatus && enabledCount > 0 && (
-                <IconButton
+                <Button
                   icon={SvgXCircle}
-                  internal
+                  prominence="tertiary"
+                  size="sm"
                   onClick={() => onUpdateToolsStatus(false)}
                   tooltip="Disable all tools"
                   aria-label="Disable all tools"
                 />
               )}
               {onUpdateToolsStatus && enabledCount === 0 && (
-                <Button tertiary onClick={() => onUpdateToolsStatus(true)}>
+                <Button
+                  prominence="tertiary"
+                  onClick={() => onUpdateToolsStatus(true)}
+                >
                   Enable all
                 </Button>
               )}
             </div>
           </div>
-        </FadeDiv>
+        </div>
       )}
     </>
   );
 };
-
 ToolsList.displayName = "ToolsList";
+
 export default ToolsList;

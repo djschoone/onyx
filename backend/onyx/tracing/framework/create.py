@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any
 from typing import TYPE_CHECKING
+
+from onyx.utils.logger import setup_logger
 
 from .setup import get_trace_provider
 from .span_data import AgentSpanData
@@ -11,7 +15,6 @@ from .span_data import FunctionSpanData
 from .span_data import GenerationSpanData
 from .spans import Span
 from .traces import Trace
-from onyx.utils.logger import setup_logger
 
 if TYPE_CHECKING:
     pass
@@ -62,6 +65,33 @@ def trace(
         metadata=metadata,
         disabled=disabled,
     )
+
+
+@contextmanager
+def ensure_trace(
+    workflow_name: str,
+    trace_id: str | None = None,
+    group_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    disabled: bool = False,
+) -> Iterator[Trace | None]:
+    """
+    Ensure a trace exists. If a trace is already active, reuse it.
+    Otherwise, create a new trace for the duration of the context.
+    """
+    current_trace = get_trace_provider().get_current_trace()
+    if current_trace:
+        yield current_trace
+        return
+
+    with trace(
+        workflow_name=workflow_name,
+        trace_id=trace_id,
+        group_id=group_id,
+        metadata=metadata,
+        disabled=disabled,
+    ) as created_trace:
+        yield created_trace
 
 
 def get_current_trace() -> Trace | None:
@@ -147,9 +177,11 @@ def function_span(
 def generation_span(
     input: Sequence[Mapping[str, Any]] | None = None,
     output: Sequence[Mapping[str, Any]] | None = None,
+    reasoning: str | None = None,
     model: str | None = None,
     model_config: Mapping[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
+    time_to_first_action_seconds: float | None = None,
     span_id: str | None = None,
     parent: Trace | Span[Any] | None = None,
     disabled: bool = False,
@@ -165,9 +197,11 @@ def generation_span(
     Args:
         input: The sequence of input messages sent to the model.
         output: The sequence of output messages received from the model.
+        reasoning: The reasoning/thinking content from reasoning models (e.g., Claude extended thinking).
         model: The model identifier used for the generation.
         model_config: The model configuration (hyperparameters) used.
         usage: A dictionary of usage information (input tokens, output tokens, etc.).
+        time_to_first_action_seconds: Time elapsed before the first model action is observed.
         span_id: The ID of the span. Optional. If not provided, we will generate an ID. We
             recommend using `util.gen_span_id()` to generate a span ID, to guarantee that IDs are
             correctly formatted.
@@ -182,9 +216,11 @@ def generation_span(
         span_data=GenerationSpanData(
             input=input,
             output=output,
+            reasoning=reasoning,
             model=model,
             model_config=model_config,
             usage=usage,
+            time_to_first_action_seconds=time_to_first_action_seconds,
         ),
         span_id=span_id,
         parent=parent,

@@ -24,8 +24,7 @@ TOOL_DESCRIPTIONS = {
         "The action will be used when the user asks the agent to generate an image."
     ),
     "WebSearchTool": (
-        "The Web Search Action allows the agent "
-        "to perform internet searches for up-to-date information."
+        "The Web Search Action allows the agent to perform internet searches for up-to-date information."
     ),
     "KnowledgeGraphTool": (
         "The Knowledge Graph Search Action allows the agent to search the "
@@ -42,20 +41,13 @@ TOOL_DESCRIPTIONS = {
 
 def upgrade() -> None:
     conn = op.get_bind()
-    conn.execute(sa.text("BEGIN"))
-
-    try:
-        for tool_id, description in TOOL_DESCRIPTIONS.items():
-            conn.execute(
-                sa.text(
-                    "UPDATE tool SET description = :description WHERE in_code_tool_id = :tool_id"
-                ),
-                {"description": description, "tool_id": tool_id},
-            )
-        conn.execute(sa.text("COMMIT"))
-    except Exception as e:
-        conn.execute(sa.text("ROLLBACK"))
-        raise e
+    for tool_id, description in TOOL_DESCRIPTIONS.items():
+        conn.execute(
+            sa.text(
+                "UPDATE tool SET description = :description WHERE in_code_tool_id = :tool_id"
+            ),
+            {"description": description, "tool_id": tool_id},
+        )
 
 
 def downgrade() -> None:

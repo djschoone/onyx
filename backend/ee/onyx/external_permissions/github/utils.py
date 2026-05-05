@@ -56,8 +56,7 @@ def _run_with_retry(
         if retry_count < MAX_RETRY_COUNT:
             sleep_after_rate_limit_exception(github_client)
             logger.warning(
-                f"Rate limit exceeded while {description}. Retrying... "
-                f"(attempt {retry_count + 1}/{MAX_RETRY_COUNT})"
+                f"Rate limit exceeded while {description}. Retrying... (attempt {retry_count + 1}/{MAX_RETRY_COUNT})"
             )
             return _run_with_retry(
                 operation, description, github_client, retry_count + 1
@@ -91,7 +90,9 @@ class TeamInfo(BaseModel):
 
 
 def _fetch_organization_members(
-    github_client: Github, org_name: str, retry_count: int = 0
+    github_client: Github,
+    org_name: str,
+    retry_count: int = 0,  # noqa: ARG001
 ) -> List[UserInfo]:
     """Fetch all organization members including owners and regular members."""
     org_members: List[UserInfo] = []
@@ -124,7 +125,9 @@ def _fetch_organization_members(
 
 
 def _fetch_repository_teams_detailed(
-    repo: Repository, github_client: Github, retry_count: int = 0
+    repo: Repository,
+    github_client: Github,
+    retry_count: int = 0,  # noqa: ARG001
 ) -> List[TeamInfo]:
     """Fetch teams with access to the repository and their members."""
     teams_data: List[TeamInfo] = []
@@ -167,7 +170,9 @@ def _fetch_repository_teams_detailed(
 
 
 def fetch_repository_team_slugs(
-    repo: Repository, github_client: Github, retry_count: int = 0
+    repo: Repository,
+    github_client: Github,
+    retry_count: int = 0,  # noqa: ARG001
 ) -> List[str]:
     """Fetch team slugs with access to the repository."""
     logger.info(f"Fetching team slugs for repository {repo.full_name}")
@@ -408,7 +413,10 @@ def get_external_user_group(
             if collab.email:
                 user_emails.add(collab.email)
             else:
-                logger.error(f"Collaborator {collab.login} has no email")
+                # Expected per-user condition (login without a public email);
+                # skip and warn so the login in the message doesn't explode
+                # Sentry fingerprinting.
+                logger.warning(f"Collaborator {collab.login} has no email")
 
         if user_emails:
             collaborators_group = ExternalUserGroup(
@@ -424,7 +432,7 @@ def get_external_user_group(
             if collab.email:
                 user_emails.add(collab.email)
             else:
-                logger.error(f"Outside collaborator {collab.login} has no email")
+                logger.warning(f"Outside collaborator {collab.login} has no email")
 
         if user_emails:
             outside_collaborators_group = ExternalUserGroup(
@@ -443,7 +451,7 @@ def get_external_user_group(
                 if member.email:
                     user_emails.add(member.email)
                 else:
-                    logger.error(f"Team member {member.login} has no email")
+                    logger.warning(f"Team member {member.login} has no email")
 
             if user_emails:
                 team_group = ExternalUserGroup(
@@ -473,7 +481,7 @@ def get_external_user_group(
             if member.email:
                 user_emails.add(member.email)
             else:
-                logger.error(f"Org member {member.login} has no email")
+                logger.warning(f"Org member {member.login} has no email")
 
         org_group = ExternalUserGroup(
             id=org_group_id,

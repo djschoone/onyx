@@ -1,8 +1,12 @@
 import json
+import re
+import time
+import uuid
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from html import unescape
 from typing import Any
 from typing import cast
 
@@ -11,12 +15,16 @@ from onyx.chat.citation_processor import DynamicCitationProcessor
 from onyx.chat.emitter import Emitter
 from onyx.chat.models import ChatMessageSimple
 from onyx.chat.models import LlmStepResult
+from onyx.chat.tool_call_args_streaming import maybe_emit_argument_delta
 from onyx.configs.app_configs import LOG_ONYX_MODEL_INTERACTIONS
+from onyx.configs.app_configs import PROMPT_CACHE_CHAT_HISTORY
 from onyx.configs.constants import MessageType
 from onyx.context.search.models import SearchDoc
 from onyx.file_store.models import ChatFileType
+from onyx.llm.constants import LlmProviderNames
 from onyx.llm.interfaces import LanguageModelInput
 from onyx.llm.interfaces import LLM
+from onyx.llm.interfaces import LLMConfig
 from onyx.llm.interfaces import LLMUserIdentity
 from onyx.llm.interfaces import ToolChoiceOptions
 from onyx.llm.model_response import Delta
@@ -31,6 +39,11 @@ from onyx.llm.models import TextContentPart
 from onyx.llm.models import ToolCall
 from onyx.llm.models import ToolMessage
 from onyx.llm.models import UserMessage
+from onyx.llm.prompt_cache.processor import process_with_prompt_cache
+from onyx.llm.utils import model_needs_formatting_reenabled
+from onyx.prompts.chat_prompts import CODE_BLOCK_MARKDOWN
+from onyx.prompts.constants import SYSTEM_REMINDER_TAG_CLOSE
+from onyx.prompts.constants import SYSTEM_REMINDER_TAG_OPEN
 from onyx.server.query_and_chat.placement import Placement
 from onyx.server.query_and_chat.streaming_models import AgentResponseDelta
 from onyx.server.query_and_chat.streaming_models import AgentResponseStart
@@ -39,15 +52,122 @@ from onyx.server.query_and_chat.streaming_models import Packet
 from onyx.server.query_and_chat.streaming_models import ReasoningDelta
 from onyx.server.query_and_chat.streaming_models import ReasoningDone
 from onyx.server.query_and_chat.streaming_models import ReasoningStart
-from onyx.tools.models import TOOL_CALL_MSG_ARGUMENTS
-from onyx.tools.models import TOOL_CALL_MSG_FUNC_NAME
 from onyx.tools.models import ToolCallKickoff
+from onyx.tracing.flows import LLMFlow
 from onyx.tracing.framework.create import generation_span
 from onyx.utils.b64 import get_image_type_from_bytes
+from onyx.utils.jsonriver import Parser
 from onyx.utils.logger import setup_logger
-
+from onyx.utils.postgres_sanitization import sanitize_string
+from onyx.utils.text_processing import find_all_json_objects
 
 logger = setup_logger()
+
+_XML_INVOKE_BLOCK_RE = re.compile(
+    r"<invoke\b(?P<attrs>[^>]*)>(?P<body>.*?)</invoke>",
+    re.IGNORECASE | re.DOTALL,
+)
+_XML_PARAMETER_RE = re.compile(
+    r"<parameter\b(?P<attrs>[^>]*)>(?P<value>.*?)</parameter>",
+    re.IGNORECASE | re.DOTALL,
+)
+_FUNCTION_CALLS_OPEN_MARKER = "<function_calls"
+_FUNCTION_CALLS_CLOSE_MARKER = "</function_calls>"
+
+
+class _XmlToolCallContentFilter:
+    """Streaming filter that strips XML-style tool call payload blocks from text."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._inside_function_calls_block = False
+
+    def process(self, content: str) -> str:
+        if not content:
+            return ""
+
+        self._pending += content
+        output_parts: list[str] = []
+
+        while self._pending:
+            pending_lower = self._pending.lower()
+
+            if self._inside_function_calls_block:
+                end_idx = pending_lower.find(_FUNCTION_CALLS_CLOSE_MARKER)
+                if end_idx == -1:
+                    # Keep buffering until we see the close marker.
+                    return "".join(output_parts)
+
+                # Drop the whole function_calls block.
+                self._pending = self._pending[
+                    end_idx + len(_FUNCTION_CALLS_CLOSE_MARKER) :
+                ]
+                self._inside_function_calls_block = False
+                continue
+
+            start_idx = _find_function_calls_open_marker(pending_lower)
+            if start_idx == -1:
+                # Keep only a possible prefix of "<function_calls" in the buffer so
+                # marker splits across chunks are handled correctly.
+                tail_len = _matching_open_marker_prefix_len(self._pending)
+                emit_upto = len(self._pending) - tail_len
+                if emit_upto > 0:
+                    output_parts.append(self._pending[:emit_upto])
+                    self._pending = self._pending[emit_upto:]
+                return "".join(output_parts)
+
+            if start_idx > 0:
+                output_parts.append(self._pending[:start_idx])
+
+            # Enter block-stripping mode and keep scanning for close marker.
+            self._pending = self._pending[start_idx:]
+            self._inside_function_calls_block = True
+
+        return "".join(output_parts)
+
+    def flush(self) -> str:
+        if self._inside_function_calls_block:
+            # Drop any incomplete block at stream end.
+            self._pending = ""
+            self._inside_function_calls_block = False
+            return ""
+
+        remaining = self._pending
+        self._pending = ""
+        return remaining
+
+
+def _matching_open_marker_prefix_len(text: str) -> int:
+    """Return longest suffix of text that matches prefix of "<function_calls"."""
+    max_len = min(len(text), len(_FUNCTION_CALLS_OPEN_MARKER) - 1)
+    text_lower = text.lower()
+    marker_lower = _FUNCTION_CALLS_OPEN_MARKER
+
+    for candidate_len in range(max_len, 0, -1):
+        if text_lower.endswith(marker_lower[:candidate_len]):
+            return candidate_len
+
+    return 0
+
+
+def _is_valid_function_calls_open_follower(char: str | None) -> bool:
+    return char is None or char in {">", " ", "\t", "\n", "\r"}
+
+
+def _find_function_calls_open_marker(text_lower: str) -> int:
+    """Find '<function_calls' with a valid tag boundary follower."""
+    search_from = 0
+    while True:
+        idx = text_lower.find(_FUNCTION_CALLS_OPEN_MARKER, search_from)
+        if idx == -1:
+            return -1
+
+        follower_pos = idx + len(_FUNCTION_CALLS_OPEN_MARKER)
+        follower = text_lower[follower_pos] if follower_pos < len(text_lower) else None
+        if _is_valid_function_calls_open_follower(follower):
+            return idx
+
+        search_from = idx + 1
 
 
 def _try_parse_json_string(value: Any) -> Any:
@@ -96,10 +216,16 @@ def _parse_tool_args_to_dict(raw_args: Any) -> dict[str, Any]:
 
     if isinstance(raw_args, dict):
         # Parse any string values that look like JSON arrays/objects
-        return {k: _try_parse_json_string(v) for k, v in raw_args.items()}
+        return {
+            k: _try_parse_json_string(sanitize_string(v) if isinstance(v, str) else v)
+            for k, v in raw_args.items()
+        }
 
     if not isinstance(raw_args, str):
         return {}
+
+    # Sanitize before parsing to remove NULL bytes and surrogates
+    raw_args = sanitize_string(raw_args)
 
     try:
         parsed1: Any = json.loads(raw_args)
@@ -134,12 +260,11 @@ def _format_message_history_for_logging(
 
     separator = "================================================"
 
-    # Handle string input
-    if isinstance(message_history, str):
-        formatted_lines.append("Message [string]:")
-        formatted_lines.append(separator)
-        formatted_lines.append(f"{message_history}")
-        return "\n".join(formatted_lines)
+    # Handle single ChatCompletionMessage - wrap in list for uniform processing
+    if isinstance(
+        message_history, (SystemMessage, UserMessage, AssistantMessage, ToolMessage)
+    ):
+        message_history = [message_history]
 
     # Handle sequence of messages
     for i, msg in enumerate(message_history):
@@ -209,7 +334,8 @@ def _update_tool_call_with_delta(
 
     if index not in tool_calls_in_progress:
         tool_calls_in_progress[index] = {
-            "id": None,
+            # Fallback ID in case the provider never sends one via deltas.
+            "id": f"fallback_{uuid.uuid4().hex}",
             "name": None,
             "arguments": "",
         }
@@ -248,14 +374,7 @@ def _extract_tool_call_kickoffs(
     tab_index_calculated = 0
     for tool_call_data in id_to_tool_call_map.values():
         if tool_call_data.get("id") and tool_call_data.get("name"):
-            try:
-                tool_args = _parse_tool_args_to_dict(tool_call_data.get("arguments"))
-            except json.JSONDecodeError:
-                # If parsing fails, try empty dict, most tools would fail though
-                logger.error(
-                    f"Failed to parse tool call arguments: {tool_call_data['arguments']}"
-                )
-                tool_args = {}
+            tool_args = _parse_tool_args_to_dict(tool_call_data.get("arguments"))
 
             tool_calls.append(
                 ToolCallKickoff(
@@ -275,8 +394,384 @@ def _extract_tool_call_kickoffs(
     return tool_calls
 
 
+def extract_tool_calls_from_response_text(
+    response_text: str | None,
+    tool_definitions: list[dict],
+    placement: Placement,
+) -> list[ToolCallKickoff]:
+    """Extract tool calls from LLM response text by matching JSON against tool definitions.
+
+    This is a fallback mechanism for when the LLM was expected to return tool calls
+    but didn't use the proper tool call format. It searches for tool calls embedded
+    in response text (JSON first, then XML-like invoke blocks) that match available
+    tool definitions.
+
+    Args:
+        response_text: The LLM's text response to search for tool calls
+        tool_definitions: List of tool definitions to match against
+        placement: Placement information for the tool calls
+
+    Returns:
+        List of ToolCallKickoff objects for any matched tool calls
+    """
+    if not response_text or not tool_definitions:
+        return []
+
+    # Build a map of tool names to their definitions
+    tool_name_to_def: dict[str, dict] = {}
+    for tool_def in tool_definitions:
+        if tool_def.get("type") == "function" and "function" in tool_def:
+            func_def = tool_def["function"]
+            tool_name = func_def.get("name")
+            if tool_name:
+                tool_name_to_def[tool_name] = func_def
+
+    if not tool_name_to_def:
+        return []
+
+    matched_tool_calls: list[tuple[str, dict[str, Any]]] = []
+    # Find all JSON objects in the response text
+    json_objects = find_all_json_objects(response_text)
+    prev_json_obj: dict[str, Any] | None = None
+    prev_tool_call: tuple[str, dict[str, Any]] | None = None
+
+    for json_obj in json_objects:
+        matched_tool_call = _try_match_json_to_tool(json_obj, tool_name_to_def)
+        if not matched_tool_call:
+            continue
+
+        # `find_all_json_objects` can return both an outer tool-call object and
+        # its nested arguments object. If both resolve to the same tool call,
+        # drop only this nested duplicate artifact.
+        if (
+            prev_json_obj is not None
+            and prev_tool_call is not None
+            and matched_tool_call == prev_tool_call
+            and _is_nested_arguments_duplicate(
+                previous_json_obj=prev_json_obj,
+                current_json_obj=json_obj,
+                tool_name_to_def=tool_name_to_def,
+            )
+        ):
+            continue
+
+        matched_tool_calls.append(matched_tool_call)
+        prev_json_obj = json_obj
+        prev_tool_call = matched_tool_call
+
+    # Some providers/models emit XML-style function calls instead of JSON objects.
+    # Keep this as a fallback behind JSON extraction to preserve current behavior.
+    if not matched_tool_calls:
+        matched_tool_calls = _extract_xml_tool_calls_from_response_text(
+            response_text=response_text,
+            tool_name_to_def=tool_name_to_def,
+        )
+
+    tool_calls: list[ToolCallKickoff] = []
+    for tab_index, (tool_name, tool_args) in enumerate(matched_tool_calls):
+        tool_calls.append(
+            ToolCallKickoff(
+                tool_call_id=f"extracted_{uuid.uuid4().hex[:8]}",
+                tool_name=tool_name,
+                tool_args=tool_args,
+                placement=Placement(
+                    turn_index=placement.turn_index,
+                    tab_index=tab_index,
+                    sub_turn_index=placement.sub_turn_index,
+                ),
+            )
+        )
+
+    logger.info(
+        f"Extracted {len(tool_calls)} tool call(s) from response text as fallback"
+    )
+
+    return tool_calls
+
+
+def _extract_xml_tool_calls_from_response_text(
+    response_text: str,
+    tool_name_to_def: dict[str, dict],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Extract XML-style tool calls from response text.
+
+    Supports formats such as:
+    <function_calls>
+      <invoke name="internal_search">
+        <parameter name="queries" string="false">["foo"]</parameter>
+      </invoke>
+    </function_calls>
+    """
+    matched_tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    for invoke_match in _XML_INVOKE_BLOCK_RE.finditer(response_text):
+        invoke_attrs = invoke_match.group("attrs")
+        tool_name = _extract_xml_attribute(invoke_attrs, "name")
+        if not tool_name or tool_name not in tool_name_to_def:
+            continue
+
+        tool_args: dict[str, Any] = {}
+        invoke_body = invoke_match.group("body")
+        for parameter_match in _XML_PARAMETER_RE.finditer(invoke_body):
+            parameter_attrs = parameter_match.group("attrs")
+            parameter_name = _extract_xml_attribute(parameter_attrs, "name")
+            if not parameter_name:
+                continue
+
+            string_attr = _extract_xml_attribute(parameter_attrs, "string")
+            tool_args[parameter_name] = _parse_xml_parameter_value(
+                raw_value=parameter_match.group("value"),
+                string_attr=string_attr,
+            )
+
+        matched_tool_calls.append((tool_name, tool_args))
+
+    return matched_tool_calls
+
+
+def _extract_xml_attribute(attrs: str, attr_name: str) -> str | None:
+    """Extract a single XML-style attribute value from a tag attribute string."""
+    attr_match = re.search(
+        rf"""\b{re.escape(attr_name)}\s*=\s*(['"])(.*?)\1""",
+        attrs,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not attr_match:
+        return None
+    return sanitize_string(unescape(attr_match.group(2).strip()))
+
+
+def _parse_xml_parameter_value(raw_value: str, string_attr: str | None) -> Any:
+    """Parse a parameter value from XML-style tool call payloads."""
+    value = sanitize_string(unescape(raw_value).strip())
+
+    if string_attr and string_attr.lower() == "true":
+        return value
+
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _resolve_tool_arguments(obj: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract and parse an arguments/parameters value from a tool-call-like object.
+
+    Looks for "arguments" or "parameters" keys, handles JSON-string values,
+    and returns a dict if successful, or None otherwise.
+    """
+    arguments = obj.get("arguments", obj.get("parameters", {}))
+    if isinstance(arguments, str):
+        arguments = sanitize_string(arguments)
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = {}
+    if isinstance(arguments, dict):
+        return arguments
+    return None
+
+
+def _try_match_json_to_tool(
+    json_obj: dict[str, Any],
+    tool_name_to_def: dict[str, dict],
+) -> tuple[str, dict[str, Any]] | None:
+    """Try to match a JSON object to a tool definition.
+
+    Supports several formats:
+    1. Direct tool call format: {"name": "tool_name", "arguments": {...}}
+    2. Function call format: {"function": {"name": "tool_name", "arguments": {...}}}
+    3. Tool name as key: {"tool_name": {...arguments...}}
+    4. Arguments matching a tool's parameter schema
+
+    Args:
+        json_obj: The JSON object to match
+        tool_name_to_def: Map of tool names to their function definitions
+
+    Returns:
+        Tuple of (tool_name, tool_args) if matched, None otherwise
+    """
+    # Format 1: Direct tool call format {"name": "...", "arguments": {...}}
+    if "name" in json_obj and json_obj["name"] in tool_name_to_def:
+        tool_name = json_obj["name"]
+        arguments = _resolve_tool_arguments(json_obj)
+        if arguments is not None:
+            return (tool_name, arguments)
+
+    # Format 2: Function call format {"function": {"name": "...", "arguments": {...}}}
+    if "function" in json_obj and isinstance(json_obj["function"], dict):
+        func_obj = json_obj["function"]
+        if "name" in func_obj and func_obj["name"] in tool_name_to_def:
+            tool_name = func_obj["name"]
+            arguments = _resolve_tool_arguments(func_obj)
+            if arguments is not None:
+                return (tool_name, arguments)
+
+    # Format 3: Tool name as key {"tool_name": {...arguments...}}
+    for tool_name in tool_name_to_def:
+        if tool_name in json_obj:
+            arguments = json_obj[tool_name]
+            if isinstance(arguments, dict):
+                return (tool_name, arguments)
+
+    # Format 4: Check if the JSON object matches a tool's parameter schema
+    for tool_name, func_def in tool_name_to_def.items():
+        params = func_def.get("parameters", {})
+        properties = params.get("properties", {})
+        required = params.get("required", [])
+
+        if not properties:
+            continue
+
+        # Check if all required parameters are present (empty required = all optional)
+        if all(req in json_obj for req in required):
+            # Check if any of the tool's properties are in the JSON object
+            matching_props = [prop for prop in properties if prop in json_obj]
+            if matching_props:
+                # Filter to only include known properties
+                filtered_args = {k: v for k, v in json_obj.items() if k in properties}
+                return (tool_name, filtered_args)
+
+    return None
+
+
+def _is_nested_arguments_duplicate(
+    previous_json_obj: dict[str, Any],
+    current_json_obj: dict[str, Any],
+    tool_name_to_def: dict[str, dict],
+) -> bool:
+    """Detect when current object is the nested args object from previous tool call."""
+    extracted_args = _extract_nested_arguments_obj(previous_json_obj, tool_name_to_def)
+    return extracted_args is not None and current_json_obj == extracted_args
+
+
+def _extract_nested_arguments_obj(
+    json_obj: dict[str, Any],
+    tool_name_to_def: dict[str, dict],
+) -> dict[str, Any] | None:
+    # Format 1: {"name": "...", "arguments": {...}} or {"name": "...", "parameters": {...}}
+    if "name" in json_obj and json_obj["name"] in tool_name_to_def:
+        args_obj = json_obj.get("arguments", json_obj.get("parameters"))
+        if isinstance(args_obj, dict):
+            return args_obj
+
+    # Format 2: {"function": {"name": "...", "arguments": {...}}}
+    if "function" in json_obj and isinstance(json_obj["function"], dict):
+        function_obj = json_obj["function"]
+        if "name" in function_obj and function_obj["name"] in tool_name_to_def:
+            args_obj = function_obj.get("arguments", function_obj.get("parameters"))
+            if isinstance(args_obj, dict):
+                return args_obj
+
+    # Format 3: {"tool_name": {...arguments...}}
+    for tool_name in tool_name_to_def:
+        if tool_name in json_obj and isinstance(json_obj[tool_name], dict):
+            return json_obj[tool_name]
+
+    return None
+
+
+def _build_structured_assistant_message(msg: ChatMessageSimple) -> AssistantMessage:
+    tool_calls_list: list[ToolCall] | None = None
+    if msg.tool_calls:
+        tool_calls_list = [
+            ToolCall(
+                id=tc.tool_call_id,
+                type="function",
+                function=FunctionCall(
+                    name=tc.tool_name,
+                    arguments=json.dumps(tc.tool_arguments),
+                ),
+            )
+            for tc in msg.tool_calls
+        ]
+
+    return AssistantMessage(
+        role="assistant",
+        content=msg.message or None,
+        tool_calls=tool_calls_list,
+    )
+
+
+def _build_structured_tool_response_message(msg: ChatMessageSimple) -> ToolMessage:
+    if not msg.tool_call_id:
+        raise ValueError(
+            f"Tool call response message encountered but tool_call_id is not available. Message: {msg}"
+        )
+
+    return ToolMessage(
+        role="tool",
+        content=msg.message,
+        tool_call_id=msg.tool_call_id,
+    )
+
+
+class _HistoryMessageFormatter:
+    def format_assistant_message(self, msg: ChatMessageSimple) -> AssistantMessage:
+        raise NotImplementedError
+
+    def format_tool_response_message(
+        self, msg: ChatMessageSimple
+    ) -> ToolMessage | UserMessage:
+        raise NotImplementedError
+
+
+class _DefaultHistoryMessageFormatter(_HistoryMessageFormatter):
+    def format_assistant_message(self, msg: ChatMessageSimple) -> AssistantMessage:
+        return _build_structured_assistant_message(msg)
+
+    def format_tool_response_message(self, msg: ChatMessageSimple) -> ToolMessage:
+        return _build_structured_tool_response_message(msg)
+
+
+class _OllamaHistoryMessageFormatter(_HistoryMessageFormatter):
+    def format_assistant_message(self, msg: ChatMessageSimple) -> AssistantMessage:
+        if not msg.tool_calls:
+            return _build_structured_assistant_message(msg)
+
+        tool_call_lines = [
+            (
+                f"[Tool Call] name={tc.tool_name} id={tc.tool_call_id} args={json.dumps(tc.tool_arguments)}"
+            )
+            for tc in msg.tool_calls
+        ]
+        assistant_content = (
+            "\n".join([msg.message, *tool_call_lines])
+            if msg.message
+            else "\n".join(tool_call_lines)
+        )
+        return AssistantMessage(
+            role="assistant",
+            content=assistant_content,
+            tool_calls=None,
+        )
+
+    def format_tool_response_message(self, msg: ChatMessageSimple) -> UserMessage:
+        if not msg.tool_call_id:
+            raise ValueError(
+                f"Tool call response message encountered but tool_call_id is not available. Message: {msg}"
+            )
+
+        return UserMessage(
+            role="user",
+            content=f"[Tool Result] id={msg.tool_call_id}\n{msg.message}",
+        )
+
+
+_DEFAULT_HISTORY_MESSAGE_FORMATTER = _DefaultHistoryMessageFormatter()
+_OLLAMA_HISTORY_MESSAGE_FORMATTER = _OllamaHistoryMessageFormatter()
+
+
+def _get_history_message_formatter(llm_config: LLMConfig) -> _HistoryMessageFormatter:
+    if llm_config.model_provider == LlmProviderNames.OLLAMA_CHAT:
+        return _OLLAMA_HISTORY_MESSAGE_FORMATTER
+
+    return _DEFAULT_HISTORY_MESSAGE_FORMATTER
+
+
 def translate_history_to_llm_format(
     history: list[ChatMessageSimple],
+    llm_config: LLMConfig,
 ) -> LanguageModelInput:
     """Convert a list of ChatMessageSimple to LanguageModelInput format.
 
@@ -284,8 +779,28 @@ def translate_history_to_llm_format(
     handling different message types and image files for multimodal support.
     """
     messages: list[ChatCompletionMessage] = []
+    history_message_formatter = _get_history_message_formatter(llm_config)
+    # Note: cacheability is computed from pre-translation ChatMessageSimple types.
+    # Some providers flatten tool history into plain assistant/user text, so this split
+    # may be less semantically meaningful, but it remains safe and order-preserving.
+    last_cacheable_msg_idx = -1
+    all_previous_msgs_cacheable = True
 
-    for msg in history:
+    for idx, msg in enumerate(history):
+        # if the message is being added to the history
+        if PROMPT_CACHE_CHAT_HISTORY and msg.message_type in [
+            MessageType.SYSTEM,
+            MessageType.USER,
+            MessageType.USER_REMINDER,
+            MessageType.ASSISTANT,
+            MessageType.TOOL_CALL_RESPONSE,
+        ]:
+            all_previous_msgs_cacheable = (
+                all_previous_msgs_cacheable and msg.should_cache
+            )
+            if all_previous_msgs_cacheable:
+                last_cacheable_msg_idx = idx
+
         if msg.message_type == MessageType.SYSTEM:
             system_msg = SystemMessage(
                 role="system",
@@ -312,6 +827,12 @@ def translate_history_to_llm_format(
                             base64_data = img_file.to_base64()
                             image_url = f"data:{image_type};base64,{base64_data}"
 
+                            content_parts.append(
+                                TextContentPart(
+                                    type="text",
+                                    text=f"[attached image — file_id: {img_file.file_id}]",
+                                )
+                            )
                             image_part = ImageContentPart(
                                 type="image_url",
                                 image_url=ImageUrlDetail(
@@ -322,8 +843,7 @@ def translate_history_to_llm_format(
                             content_parts.append(image_part)
                         except Exception as e:
                             logger.warning(
-                                f"Failed to process image file {img_file.file_id}: {e}. "
-                                "Skipping image."
+                                f"Failed to process image file {img_file.file_id}: {e}. Skipping image."
                             )
                 user_msg = UserMessage(
                     role="user",
@@ -338,84 +858,49 @@ def translate_history_to_llm_format(
                 )
                 messages.append(user_msg_text)
 
+        elif msg.message_type == MessageType.USER_REMINDER:
+            # User reminder messages are wrapped with system-reminder tags
+            # and converted to UserMessage (LLM APIs don't have a native reminder type)
+            wrapped_content = f"{SYSTEM_REMINDER_TAG_OPEN}\n{msg.message}\n{SYSTEM_REMINDER_TAG_CLOSE}"
+            reminder_msg = UserMessage(
+                role="user",
+                content=wrapped_content,
+            )
+            messages.append(reminder_msg)
+
         elif msg.message_type == MessageType.ASSISTANT:
-            assistant_msg = AssistantMessage(
-                role="assistant",
-                content=msg.message or None,
-                tool_calls=None,
-            )
-            messages.append(assistant_msg)
-
-        elif msg.message_type == MessageType.TOOL_CALL:
-            # Tool calls are represented as Assistant Messages with tool_calls field
-            # Try to reconstruct tool call structure if we have tool_call_id
-            tool_calls: list[ToolCall] = []
-            if msg.tool_call_id:
-                try:
-                    # Parse the message content (which should contain function_name and arguments)
-                    tool_call_data = json.loads(msg.message) if msg.message else {}
-
-                    if (
-                        isinstance(tool_call_data, dict)
-                        and TOOL_CALL_MSG_FUNC_NAME in tool_call_data
-                    ):
-                        function_name = tool_call_data.get(
-                            TOOL_CALL_MSG_FUNC_NAME, "unknown"
-                        )
-                        raw_args = tool_call_data.get(TOOL_CALL_MSG_ARGUMENTS, {})
-                    else:
-                        function_name = "unknown"
-                        raw_args = (
-                            tool_call_data if isinstance(tool_call_data, dict) else {}
-                        )
-
-                    # IMPORTANT: `FunctionCall.arguments` must be a JSON object string.
-                    # If `raw_args` is accidentally a JSON string literal of an object
-                    # (e.g. '"{\\"queries\\":[...]}"'), calling `json.dumps(raw_args)`
-                    # would produce a quoted JSON literal and break Anthropic tool parsing.
-                    tool_args = _parse_tool_args_to_dict(raw_args)
-
-                    # NOTE: if the model is trained on a different tool call format, this may slightly interfere
-                    # with the future tool calls, if it doesn't look like this. Almost certainly not a big deal.
-                    tool_call = ToolCall(
-                        id=msg.tool_call_id,
-                        type="function",
-                        function=FunctionCall(
-                            name=function_name,
-                            arguments=json.dumps(tool_args) if tool_args else "{}",
-                        ),
-                    )
-                    tool_calls.append(tool_call)
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning(
-                        f"Failed to parse tool call data for tool_call_id {msg.tool_call_id}: {e}. "
-                        "Including as content-only message."
-                    )
-
-            assistant_msg_with_tool = AssistantMessage(
-                role="assistant",
-                content=None,  # The tool call is parsed, doesn't need to be duplicated in the content
-                tool_calls=tool_calls if tool_calls else None,
-            )
-            messages.append(assistant_msg_with_tool)
+            messages.append(history_message_formatter.format_assistant_message(msg))
 
         elif msg.message_type == MessageType.TOOL_CALL_RESPONSE:
-            if not msg.tool_call_id:
-                raise ValueError(
-                    f"Tool call response message encountered but tool_call_id is not available. Message: {msg}"
-                )
-
-            tool_msg = ToolMessage(
-                role="tool",
-                content=msg.message,
-                tool_call_id=msg.tool_call_id,
-            )
-            messages.append(tool_msg)
+            messages.append(history_message_formatter.format_tool_response_message(msg))
 
         else:
             logger.warning(
                 f"Unknown message type {msg.message_type} in history. Skipping message."
             )
+
+    # Apply model-specific formatting when translating to LLM format (e.g. OpenAI
+    # reasoning models need CODE_BLOCK_MARKDOWN prefix for correct markdown generation)
+    if model_needs_formatting_reenabled(llm_config.model_name):
+        for i, m in enumerate(messages):
+            if isinstance(m, SystemMessage):
+                messages[i] = SystemMessage(
+                    role="system",
+                    content=CODE_BLOCK_MARKDOWN + m.content,
+                )
+                break
+
+    # prompt caching: rely on should_cache in ChatMessageSimple to
+    # pick the split point for the cacheable prefix and suffix
+    if last_cacheable_msg_idx != -1:
+        processed_messages, _ = process_with_prompt_cache(
+            llm_config=llm_config,
+            cacheable_prefix=messages[: last_cacheable_msg_idx + 1],
+            suffix=messages[last_cacheable_msg_idx + 1 :],
+            continuation=False,
+        )
+        assert isinstance(processed_messages, list)  # for mypy
+        messages = processed_messages
 
     return messages
 
@@ -429,6 +914,10 @@ def _increment_turns(
         return turn_index, sub_turn_index + 1
 
 
+def _delta_has_action(delta: Delta) -> bool:
+    return bool(delta.content or delta.reasoning_content or delta.tool_calls)
+
+
 def run_llm_step_pkt_generator(
     history: list[ChatMessageSimple],
     tool_definitions: list[dict],
@@ -437,7 +926,7 @@ def run_llm_step_pkt_generator(
     placement: Placement,
     state_container: ChatStateContainer | None,
     citation_processor: DynamicCitationProcessor | None,
-    reasoning_effort: ReasoningEffort | None = None,
+    reasoning_effort: ReasoningEffort = ReasoningEffort.AUTO,
     final_documents: list[SearchDoc] | None = None,
     user_identity: LLMUserIdentity | None = None,
     custom_token_processor: (
@@ -447,6 +936,8 @@ def run_llm_step_pkt_generator(
     # TODO: Temporary handling of nested tool calls with agents, figure out a better way to handle this
     use_existing_tab_index: bool = False,
     is_deep_research: bool = False,
+    pre_answer_processing_time: float | None = None,
+    timeout_override: int | None = None,
 ) -> Generator[Packet, None, tuple[LlmStepResult, bool]]:
     """Run an LLM step and stream the response as packets.
     NOTE: DO NOT TOUCH THIS FUNCTION BEFORE ASKING YUHONG, this is very finicky and
@@ -461,7 +952,8 @@ def run_llm_step_pkt_generator(
         tool_definitions: List of tool definitions available to the LLM.
         tool_choice: Tool choice configuration (e.g., "auto", "required", "none").
         llm: Language model interface to use for generation.
-        turn_index: Current turn index in the conversation.
+        placement: Placement info (turn_index, tab_index, sub_turn_index) for
+            positioning packets in the conversation UI.
         state_container: Container for storing chat state (reasoning, answers).
         citation_processor: Optional processor for extracting and formatting citations
             from the response. If provided, processes tokens to identify citations.
@@ -473,7 +965,14 @@ def run_llm_step_pkt_generator(
         custom_token_processor: Optional callable that processes each token delta
             before yielding. Receives (delta, processor_state) and returns
             (modified_delta, new_processor_state). Can return None for delta to skip.
-        sub_turn_index: Optional sub-turn index for nested tool/agent calls.
+        max_tokens: Optional maximum number of tokens for the LLM response.
+        use_existing_tab_index: If True, use the tab_index from placement for all
+            tool calls instead of auto-incrementing.
+        is_deep_research: If True, treat content before tool calls as reasoning
+            when tool_choice is REQUIRED.
+        pre_answer_processing_time: Optional time spent processing before the
+            answer started, recorded in state_container for analytics.
+        timeout_override: Optional timeout override for the LLM call.
 
     Yields:
         Packet: Streaming packets containing:
@@ -499,20 +998,33 @@ def run_llm_step_pkt_generator(
     tab_index = placement.tab_index
     sub_turn_index = placement.sub_turn_index
 
-    llm_msg_history = translate_history_to_llm_format(history)
-    has_reasoned = 0
+    def _current_placement() -> Placement:
+        return Placement(
+            turn_index=turn_index,
+            tab_index=tab_index,
+            sub_turn_index=sub_turn_index,
+        )
 
-    # Uncomment the line below to log the entire message history to the console
+    llm_msg_history = translate_history_to_llm_format(history, llm.config)
+    has_reasoned = False
+
     if LOG_ONYX_MODEL_INTERACTIONS:
-        logger.info(
+        logger.debug(
             f"Message history:\n{_format_message_history_for_logging(llm_msg_history)}"
         )
 
     id_to_tool_call_map: dict[int, dict[str, Any]] = {}
+    arg_parsers: dict[int, Parser] = {}
     reasoning_start = False
     answer_start = False
     accumulated_reasoning = ""
     accumulated_answer = ""
+    accumulated_raw_answer = ""
+    stream_chunk_count = 0
+    actionable_chunk_count = 0
+    empty_chunk_count = 0
+    finish_reasons: set[str] = set()
+    xml_tool_call_content_filter = _XmlToolCallContentFilter()
 
     processor_state: Any = None
 
@@ -521,11 +1033,120 @@ def run_llm_step_pkt_generator(
         model_config={
             "base_url": str(llm.config.api_base or ""),
             "model_impl": "litellm",
+            "flow": LLMFlow.CHAT_RESPONSE.value,
         },
     ) as span_generation:
         span_generation.span_data.input = cast(
             Sequence[Mapping[str, Any]], llm_msg_history
         )
+        stream_start_time = time.monotonic()
+        first_action_recorded = False
+
+        def _emit_citation_results(
+            results: Generator[str | CitationInfo, None, None],
+        ) -> Generator[Packet, None, None]:
+            """Yield packets for citation processor results (str or CitationInfo)."""
+            nonlocal accumulated_answer
+
+            for result in results:
+                if isinstance(result, str):
+                    accumulated_answer += result
+                    if state_container:
+                        state_container.set_answer_tokens(accumulated_answer)
+                    yield Packet(
+                        placement=_current_placement(),
+                        obj=AgentResponseDelta(content=result),
+                    )
+                elif isinstance(result, CitationInfo):
+                    yield Packet(
+                        placement=_current_placement(),
+                        obj=result,
+                    )
+                    if state_container:
+                        state_container.add_emitted_citation(result.citation_number)
+
+        def _close_reasoning_if_active() -> Generator[Packet, None, None]:
+            """Emit ReasoningDone and increment turns if reasoning is in progress."""
+            nonlocal reasoning_start
+            nonlocal has_reasoned
+            nonlocal turn_index
+            nonlocal sub_turn_index
+
+            if reasoning_start:
+                yield Packet(
+                    placement=Placement(
+                        turn_index=turn_index,
+                        tab_index=tab_index,
+                        sub_turn_index=sub_turn_index,
+                    ),
+                    obj=ReasoningDone(),
+                )
+                has_reasoned = True
+                turn_index, sub_turn_index = _increment_turns(
+                    turn_index, sub_turn_index
+                )
+                reasoning_start = False
+
+        def _emit_content_chunk(content_chunk: str) -> Generator[Packet, None, None]:
+            nonlocal accumulated_answer
+            nonlocal accumulated_reasoning
+            nonlocal answer_start
+            nonlocal reasoning_start
+            nonlocal turn_index
+            nonlocal sub_turn_index
+
+            # When tool_choice is REQUIRED, content before tool calls is reasoning/thinking
+            # about which tool to call, not an actual answer to the user.
+            # Treat this content as reasoning instead of answer.
+            if is_deep_research and tool_choice == ToolChoiceOptions.REQUIRED:
+                accumulated_reasoning += content_chunk
+                if state_container:
+                    state_container.set_reasoning_tokens(accumulated_reasoning)
+                if not reasoning_start:
+                    yield Packet(
+                        placement=_current_placement(),
+                        obj=ReasoningStart(),
+                    )
+                yield Packet(
+                    placement=_current_placement(),
+                    obj=ReasoningDelta(reasoning=content_chunk),
+                )
+                reasoning_start = True
+                return
+
+            # Normal flow for AUTO or NONE tool choice
+            yield from _close_reasoning_if_active()
+
+            if not answer_start:
+                # Store pre-answer processing time in state container for save_chat
+                if state_container and pre_answer_processing_time is not None:
+                    state_container.set_pre_answer_processing_time(
+                        pre_answer_processing_time
+                    )
+
+                yield Packet(
+                    placement=_current_placement(),
+                    obj=AgentResponseStart(
+                        final_documents=final_documents,
+                        pre_answer_processing_seconds=pre_answer_processing_time,
+                    ),
+                )
+                answer_start = True
+
+            if citation_processor:
+                yield from _emit_citation_results(
+                    citation_processor.process_token(content_chunk)
+                )
+            else:
+                accumulated_answer += content_chunk
+                # Save answer incrementally to state container
+                if state_container:
+                    state_container.set_answer_tokens(accumulated_answer)
+                yield Packet(
+                    placement=_current_placement(),
+                    obj=AgentResponseDelta(content=content_chunk),
+                )
+
         for packet in llm.stream(
             prompt=llm_msg_history,
             tools=tool_definitions,
@@ -534,7 +1155,9 @@ def run_llm_step_pkt_generator(
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
             user_identity=user_identity,
+            timeout_override=timeout_override,
         ):
+            stream_chunk_count += 1
             if packet.usage:
                 usage = packet.usage
                 span_generation.span_data.usage = {
@@ -544,7 +1167,31 @@ def run_llm_step_pkt_generator(
                     "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                 }
                 # Note: LLM cost tracking is now handled in multi_llm.py
+            finish_reason = packet.choice.finish_reason
+            if finish_reason:
+                finish_reasons.add(str(finish_reason))
             delta = packet.choice.delta
+
+            # Weird behavior from some model providers, just log and ignore for now
+            if (
+                not delta.content
+                and delta.reasoning_content is None
+                and not delta.tool_calls
+            ):
+                empty_chunk_count += 1
+                logger.warning(
+                    "LLM packet is empty (no content, reasoning, or tool calls). "
+                    f"finish_reason={finish_reason}. Skipping: {packet}"
+                )
+                continue
+
+            if not first_action_recorded and _delta_has_action(delta):
+                span_generation.span_data.time_to_first_action_seconds = (
+                    time.monotonic() - stream_start_time
+                )
+                first_action_recorded = True
+            if _delta_has_action(delta):
+                actionable_chunk_count += 1
 
             if custom_token_processor:
                 # The custom token processor can modify the deltas for specific custom logic
@@ -566,143 +1213,53 @@ def run_llm_step_pkt_generator(
                     state_container.set_reasoning_tokens(accumulated_reasoning)
                 if not reasoning_start:
                     yield Packet(
-                        placement=Placement(
-                            turn_index=turn_index,
-                            tab_index=tab_index,
-                            sub_turn_index=sub_turn_index,
-                        ),
+                        placement=_current_placement(),
                         obj=ReasoningStart(),
                     )
                 yield Packet(
-                    placement=Placement(
-                        turn_index=turn_index,
-                        tab_index=tab_index,
-                        sub_turn_index=sub_turn_index,
-                    ),
+                    placement=_current_placement(),
                     obj=ReasoningDelta(reasoning=delta.reasoning_content),
                 )
                 reasoning_start = True
 
             if delta.content:
-                # When tool_choice is REQUIRED, content before tool calls is reasoning/thinking
-                # about which tool to call, not an actual answer to the user.
-                # Treat this content as reasoning instead of answer.
-                if is_deep_research and tool_choice == ToolChoiceOptions.REQUIRED:
-                    # Treat content as reasoning when we know tool calls are coming
-                    accumulated_reasoning += delta.content
-                    if state_container:
-                        state_container.set_reasoning_tokens(accumulated_reasoning)
-                    if not reasoning_start:
-                        yield Packet(
-                            placement=Placement(
-                                turn_index=turn_index,
-                                tab_index=tab_index,
-                                sub_turn_index=sub_turn_index,
-                            ),
-                            obj=ReasoningStart(),
-                        )
-                    yield Packet(
-                        placement=Placement(
-                            turn_index=turn_index,
-                            tab_index=tab_index,
-                            sub_turn_index=sub_turn_index,
-                        ),
-                        obj=ReasoningDelta(reasoning=delta.content),
-                    )
-                    reasoning_start = True
-                else:
-                    # Normal flow for AUTO or NONE tool choice
-                    if reasoning_start:
-                        yield Packet(
-                            placement=Placement(
-                                turn_index=turn_index,
-                                tab_index=tab_index,
-                                sub_turn_index=sub_turn_index,
-                            ),
-                            obj=ReasoningDone(),
-                        )
-                        has_reasoned = 1
-                        turn_index, sub_turn_index = _increment_turns(
-                            turn_index, sub_turn_index
-                        )
-                        reasoning_start = False
-
-                    if not answer_start:
-                        yield Packet(
-                            placement=Placement(
-                                turn_index=turn_index,
-                                tab_index=tab_index,
-                                sub_turn_index=sub_turn_index,
-                            ),
-                            obj=AgentResponseStart(
-                                final_documents=final_documents,
-                            ),
-                        )
-                        answer_start = True
-
-                    if citation_processor:
-                        for result in citation_processor.process_token(delta.content):
-                            if isinstance(result, str):
-                                accumulated_answer += result
-                                # Save answer incrementally to state container
-                                if state_container:
-                                    state_container.set_answer_tokens(
-                                        accumulated_answer
-                                    )
-                                yield Packet(
-                                    placement=Placement(
-                                        turn_index=turn_index,
-                                        tab_index=tab_index,
-                                        sub_turn_index=sub_turn_index,
-                                    ),
-                                    obj=AgentResponseDelta(content=result),
-                                )
-                            elif isinstance(result, CitationInfo):
-                                yield Packet(
-                                    placement=Placement(
-                                        turn_index=turn_index,
-                                        tab_index=tab_index,
-                                        sub_turn_index=sub_turn_index,
-                                    ),
-                                    obj=result,
-                                )
-                    else:
-                        # When citation_processor is None, use delta.content directly without modification
-                        accumulated_answer += delta.content
-                        # Save answer incrementally to state container
-                        if state_container:
-                            state_container.set_answer_tokens(accumulated_answer)
-                        yield Packet(
-                            placement=Placement(
-                                turn_index=turn_index,
-                                tab_index=tab_index,
-                                sub_turn_index=sub_turn_index,
-                            ),
-                            obj=AgentResponseDelta(content=delta.content),
-                        )
+                # Keep raw content for fallback extraction. Display content can be
+                # filtered and, in deep-research REQUIRED mode, routed as reasoning.
+                accumulated_raw_answer += delta.content
+                filtered_content = xml_tool_call_content_filter.process(delta.content)
+                if filtered_content:
+                    yield from _emit_content_chunk(filtered_content)
 
             if delta.tool_calls:
-                if reasoning_start:
-                    yield Packet(
-                        placement=Placement(
-                            turn_index=turn_index,
-                            tab_index=tab_index,
-                            sub_turn_index=sub_turn_index,
-                        ),
-                        obj=ReasoningDone(),
-                    )
-                    has_reasoned = 1
-                    turn_index, sub_turn_index = _increment_turns(
-                        turn_index, sub_turn_index
-                    )
-                    reasoning_start = False
+                yield from _close_reasoning_if_active()
 
                 for tool_call_delta in delta.tool_calls:
+                    # maybe_emit depends and update being called first and attaching the delta
                     _update_tool_call_with_delta(id_to_tool_call_map, tool_call_delta)
+                    yield from maybe_emit_argument_delta(
+                        tool_calls_in_progress=id_to_tool_call_map,
+                        tool_call_delta=tool_call_delta,
+                        placement=_current_placement(),
+                        parsers=arg_parsers,
+                    )
+
+        # Flush any tail text buffered while checking for split "<function_calls" markers.
+        filtered_content_tail = xml_tool_call_content_filter.flush()
+        if filtered_content_tail:
+            yield from _emit_content_chunk(filtered_content_tail)
 
         # Flush custom token processor to get any final tool calls
         if custom_token_processor:
             flush_delta, processor_state = custom_token_processor(None, processor_state)
+            if (
+                not first_action_recorded
+                and flush_delta is not None
+                and _delta_has_action(flush_delta)
+            ):
+                span_generation.span_data.time_to_first_action_seconds = (
+                    time.monotonic() - stream_start_time
+                )
+                first_action_recorded = True
             if flush_delta and flush_delta.tool_calls:
                 for tool_call_delta in flush_delta.tool_calls:
                     _update_tool_call_with_delta(id_to_tool_call_map, tool_call_delta)
@@ -740,49 +1297,20 @@ def run_llm_step_pkt_generator(
             )
             span_generation.span_data.output = [assistant_msg_no_tools.model_dump()]
 
+        # Record reasoning content for tracing (extended thinking from reasoning models)
+        if accumulated_reasoning:
+            span_generation.span_data.reasoning = accumulated_reasoning
+
     # This may happen if the custom token processor is used to modify other packets into reasoning
     # Then there won't necessarily be anything else to come after the reasoning tokens
-    if reasoning_start:
-        yield Packet(
-            placement=Placement(
-                turn_index=turn_index,
-                tab_index=tab_index,
-                sub_turn_index=sub_turn_index,
-            ),
-            obj=ReasoningDone(),
-        )
-        has_reasoned = 1
-        turn_index, sub_turn_index = _increment_turns(turn_index, sub_turn_index)
-        reasoning_start = False
+    yield from _close_reasoning_if_active()
 
     # Flush any remaining content from citation processor
     # Reasoning is always first so this should use the post-incremented value of turn_index
     # Note that this doesn't need to handle any sub-turns as those docs will not have citations
     # as clickable items and will be stripped out instead.
     if citation_processor:
-        for result in citation_processor.process_token(None):
-            if isinstance(result, str):
-                accumulated_answer += result
-                # Save answer incrementally to state container
-                if state_container:
-                    state_container.set_answer_tokens(accumulated_answer)
-                yield Packet(
-                    placement=Placement(
-                        turn_index=turn_index,
-                        tab_index=tab_index,
-                        sub_turn_index=sub_turn_index,
-                    ),
-                    obj=AgentResponseDelta(content=result),
-                )
-            elif isinstance(result, CitationInfo):
-                yield Packet(
-                    placement=Placement(
-                        turn_index=turn_index,
-                        tab_index=tab_index,
-                        sub_turn_index=sub_turn_index,
-                    ),
-                    obj=result,
-                )
+        yield from _emit_citation_results(citation_processor.process_token(None))
 
     # Note: Content (AgentResponseDelta) doesn't need an explicit end packet - OverallStop handles it
     # Tool calls are handled by tool execution code and emit their own packets (e.g., SectionEnd)
@@ -790,22 +1318,32 @@ def run_llm_step_pkt_generator(
         logger.debug(f"Accumulated reasoning: {accumulated_reasoning}")
         logger.debug(f"Accumulated answer: {accumulated_answer}")
 
-    if tool_calls:
-        tool_calls_str = "\n".join(
-            f"  - {tc.tool_name}: {json.dumps(tc.tool_args, indent=4)}"
-            for tc in tool_calls
+        if tool_calls:
+            tool_calls_str = "\n".join(
+                f"  - {tc.tool_name}: {json.dumps(tc.tool_args, indent=4)}"
+                for tc in tool_calls
+            )
+            logger.debug(f"Tool calls:\n{tool_calls_str}")
+        else:
+            logger.debug("Tool calls: []")
+
+    if actionable_chunk_count == 0:
+        logger.warning(
+            "LLM stream completed with no actionable deltas. "
+            f"chunks={stream_chunk_count}, empty_chunks={empty_chunk_count}, "
+            f"finish_reasons={sorted(finish_reasons)}, "
+            f"provider={llm.config.model_provider}, model={llm.config.model_name}, "
+            f"tool_choice={tool_choice}, tools_sent={len(tool_definitions)}"
         )
-        logger.debug(f"Tool calls:\n{tool_calls_str}")
-    else:
-        logger.debug("Tool calls: []")
 
     return (
         LlmStepResult(
             reasoning=accumulated_reasoning if accumulated_reasoning else None,
             answer=accumulated_answer if accumulated_answer else None,
             tool_calls=tool_calls if tool_calls else None,
+            raw_answer=accumulated_raw_answer if accumulated_raw_answer else None,
         ),
-        bool(has_reasoned),
+        has_reasoned,
     )
 
 
@@ -818,7 +1356,7 @@ def run_llm_step(
     placement: Placement,
     state_container: ChatStateContainer | None,
     citation_processor: DynamicCitationProcessor | None,
-    reasoning_effort: ReasoningEffort | None = None,
+    reasoning_effort: ReasoningEffort = ReasoningEffort.AUTO,
     final_documents: list[SearchDoc] | None = None,
     user_identity: LLMUserIdentity | None = None,
     custom_token_processor: (
@@ -827,6 +1365,8 @@ def run_llm_step(
     max_tokens: int | None = None,
     use_existing_tab_index: bool = False,
     is_deep_research: bool = False,
+    pre_answer_processing_time: float | None = None,
+    timeout_override: int | None = None,
 ) -> tuple[LlmStepResult, bool]:
     """Wrapper around run_llm_step_pkt_generator that consumes packets and emits them.
 
@@ -848,6 +1388,8 @@ def run_llm_step(
         max_tokens=max_tokens,
         use_existing_tab_index=use_existing_tab_index,
         is_deep_research=is_deep_research,
+        pre_answer_processing_time=pre_answer_processing_time,
+        timeout_override=timeout_override,
     )
 
     while True:
@@ -856,4 +1398,4 @@ def run_llm_step(
             emitter.emit(packet)
         except StopIteration as e:
             llm_step_result, has_reasoned = e.value
-            return llm_step_result, bool(has_reasoned)
+            return llm_step_result, has_reasoned

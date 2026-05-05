@@ -3,7 +3,7 @@ from abc import ABC
 from abc import abstractmethod
 from copy import copy
 
-from tokenizers import Encoding  # type: ignore[import-untyped]
+from tokenizers import Encoding
 from tokenizers import Tokenizer
 
 from onyx.configs.model_configs import DOCUMENT_ENCODER_MODEL
@@ -173,6 +173,59 @@ def get_tokenizer(
             )
             return _get_default_tokenizer()
     return _check_tokenizer_cache(provider_type, model_name)
+
+
+# Max characters per encode() call.
+_ENCODE_CHUNK_SIZE = 500_000
+
+
+def count_tokens(
+    text: str,
+    tokenizer: BaseTokenizer,
+    token_limit: int | None = None,
+) -> int:
+    """Count tokens, chunking the input to avoid tiktoken stack overflow.
+
+    If token_limit is provided and the text is large enough to require
+    multiple chunks (> 500k chars), stops early once the count exceeds it.
+    When early-exiting, the returned value exceeds token_limit but may be
+    less than the true full token count.
+    """
+    if len(text) <= _ENCODE_CHUNK_SIZE:
+        return len(tokenizer.encode(text))
+    total = 0
+    for start in range(0, len(text), _ENCODE_CHUNK_SIZE):
+        total += len(tokenizer.encode(text[start : start + _ENCODE_CHUNK_SIZE]))
+        if token_limit is not None and total > token_limit:
+            return total  # Already over — skip remaining chunks
+    return total
+
+
+def split_text_by_tokens(
+    text: str,
+    tokenizer: BaseTokenizer,
+    max_tokens: int,
+) -> list[str]:
+    """Split ``text`` into pieces of ≤ ``max_tokens`` tokens each, via
+    encode/decode at token-id boundaries.
+
+    Note: the returned pieces are not strictly guaranteed to re-tokenize to
+    ≤ max_tokens. BPE merges at window boundaries may drift by a few tokens,
+    and cuts landing mid-multi-byte-UTF-8-character produce replacement
+    characters on decode. Good enough for "best-effort" splitting of
+    oversized content, not for hard limit enforcement.
+    """
+    if not text:
+        return []
+
+    token_ids: list[int] = []
+    for start in range(0, len(text), _ENCODE_CHUNK_SIZE):
+        token_ids.extend(tokenizer.encode(text[start : start + _ENCODE_CHUNK_SIZE]))
+
+    return [
+        tokenizer.decode(token_ids[start : start + max_tokens])
+        for start in range(0, len(token_ids), max_tokens)
+    ]
 
 
 def tokenizer_trim_content(

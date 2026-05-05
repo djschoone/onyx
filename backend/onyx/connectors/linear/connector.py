@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime
 from datetime import timezone
 from typing import Any
@@ -25,17 +26,21 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import TextSection
 from onyx.utils.logger import setup_logger
 from onyx.utils.retry_wrapper import request_with_retries
-
 
 logger = setup_logger()
 
 _NUM_RETRIES = 5
 _TIMEOUT = 60
 _LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql"
+_ACCESS_TOKEN = "access_token"
+_EXPIRE_AT = "expire_at"
+_REFRESH_TOKEN = "refresh_token"
+_EXPIRES_IN = "expires_in"
 
 
 def _make_query(request_body: dict[str, Any], api_key: str) -> requests.Response:
@@ -83,7 +88,10 @@ class LinearConnector(LoadConnector, PollConnector, OAuthConnector):
 
     @classmethod
     def oauth_authorization_url(
-        cls, base_domain: str, state: str, additional_kwargs: dict[str, str]
+        cls,
+        base_domain: str,
+        state: str,
+        additional_kwargs: dict[str, str],  # noqa: ARG003
     ) -> str:
         if not LINEAR_CLIENT_ID:
             raise ValueError("LINEAR_CLIENT_ID environment variable must be set")
@@ -101,7 +109,10 @@ class LinearConnector(LoadConnector, PollConnector, OAuthConnector):
 
     @classmethod
     def oauth_code_to_token(
-        cls, base_domain: str, code: str, additional_kwargs: dict[str, str]
+        cls,
+        base_domain: str,
+        code: str,
+        additional_kwargs: dict[str, str],  # noqa: ARG003
     ) -> dict[str, Any]:
         data = {
             "code": code,
@@ -127,20 +138,71 @@ class LinearConnector(LoadConnector, PollConnector, OAuthConnector):
 
         token_data = response.json()
 
+        expire_at = time.time() + token_data[_EXPIRES_IN]
+
         return {
-            "access_token": token_data["access_token"],
+            _ACCESS_TOKEN: token_data[_ACCESS_TOKEN],
+            _EXPIRE_AT: int(expire_at),
+            _REFRESH_TOKEN: token_data[_REFRESH_TOKEN],
         }
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
+        new_credentials = None
+
         if "linear_api_key" in credentials:
             self.linear_api_key = cast(str, credentials["linear_api_key"])
-        elif "access_token" in credentials:
-            self.linear_api_key = "Bearer " + cast(str, credentials["access_token"])
+        elif _ACCESS_TOKEN in credentials:
+            if _EXPIRE_AT not in credentials:
+                self.linear_api_key = "Bearer " + cast(str, credentials[_ACCESS_TOKEN])
+            elif credentials[_EXPIRE_AT] < time.time() + 300:  # 5-minute buffer
+                new_credentials = self.refresh_token(credentials)
+                self.linear_api_key = "Bearer " + cast(
+                    str, new_credentials[_ACCESS_TOKEN]
+                )
+            elif credentials[_EXPIRE_AT] >= time.time():
+                self.linear_api_key = "Bearer " + cast(str, credentials[_ACCESS_TOKEN])
         else:
             # May need to handle case in the future if the OAuth flow expires
             raise ConnectorMissingCredentialError("Linear")
 
-        return None
+        return new_credentials
+
+    def refresh_token(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        if _REFRESH_TOKEN not in credentials:
+            raise ConnectorMissingCredentialError("Linear")
+
+        data = {
+            _REFRESH_TOKEN: credentials[_REFRESH_TOKEN],
+            "client_id": LINEAR_CLIENT_ID,
+            "client_secret": LINEAR_CLIENT_SECRET,
+            "grant_type": _REFRESH_TOKEN,
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        response = request_with_retries(
+            method="POST",
+            url="https://api.linear.app/oauth/token",
+            data=data,
+            headers=headers,
+            backoff=0,
+            delay=0.1,
+        )
+        if not response.ok:
+            raise RuntimeError(f"Failed to refresh token: {response.text}")
+
+        token_data = response.json()
+
+        expire_at = time.time() + token_data[_EXPIRES_IN]
+
+        # Per RFC 6749 §6, the refresh response MAY omit refresh_token, in
+        # which case the existing one remains valid. Linear currently rotates
+        # refresh tokens on every refresh, but fall back defensively so a
+        # missing field doesn't force a full re-OAuth.
+        return {
+            _ACCESS_TOKEN: token_data[_ACCESS_TOKEN],
+            _EXPIRE_AT: int(expire_at),
+            _REFRESH_TOKEN: token_data.get(_REFRESH_TOKEN, credentials[_REFRESH_TOKEN]),
+        }
 
     def _process_issues(
         self, start_str: datetime | None = None, end_str: datetime | None = None
@@ -251,7 +313,7 @@ class LinearConnector(LoadConnector, PollConnector, OAuthConnector):
             logger.debug(f"Raw response from Linear: {response_json}")
             edges = response_json["data"]["issues"]["edges"]
 
-            documents: list[Document] = []
+            documents: list[Document | HierarchyNode] = []
             for edge in edges:
                 node = edge["node"]
                 # Create sections for description and comments
@@ -274,6 +336,10 @@ class LinearConnector(LoadConnector, PollConnector, OAuthConnector):
                 # Cast the sections list to the expected type
                 typed_sections = cast(list[TextSection | ImageSection], sections)
 
+                # Extract team name for hierarchy
+                team_name = (node.get("team") or {}).get("name") or "Unknown Team"
+                identifier = node.get("identifier", node["id"])
+
                 documents.append(
                     Document(
                         id=node["id"],
@@ -282,6 +348,13 @@ class LinearConnector(LoadConnector, PollConnector, OAuthConnector):
                         semantic_identifier=f"[{node['identifier']}] {node['title']}",
                         title=node["title"],
                         doc_updated_at=time_str_to_utc(node["updatedAt"]),
+                        doc_metadata={
+                            "hierarchy": {
+                                "source_path": [team_name],
+                                "team_name": team_name,
+                                "identifier": identifier,
+                            }
+                        },
                         metadata={
                             k: str(v)
                             for k, v in {

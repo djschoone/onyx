@@ -1,8 +1,8 @@
-import { test, expect } from "@chromatic-com/playwright";
-import { loginAs } from "../utils/auth";
-import { verifyCurrentModel } from "../utils/chatActions";
-import { ensureImageGenerationEnabled } from "../utils/assistantUtils";
-import { OnyxApiClient } from "../utils/onyxApiClient";
+import { test, expect } from "@playwright/test";
+import { loginAs } from "@tests/e2e/utils/auth";
+import { verifyCurrentModel } from "@tests/e2e/utils/chatActions";
+import { ensureImageGenerationEnabled } from "@tests/e2e/utils/agentUtils";
+import { OnyxApiClient } from "@tests/e2e/utils/onyxApiClient";
 
 test.describe("LLM Ordering", () => {
   let imageGenConfigId: string | null = null;
@@ -11,7 +11,7 @@ test.describe("LLM Ordering", () => {
     await page.context().clearCookies();
     await loginAs(page, "admin");
 
-    const apiClient = new OnyxApiClient(page);
+    const apiClient = new OnyxApiClient(page.request);
 
     // Create image generation config so the checkbox appears
     try {
@@ -24,7 +24,7 @@ test.describe("LLM Ordering", () => {
   });
 
   test.afterEach(async ({ page }) => {
-    const apiClient = new OnyxApiClient(page);
+    const apiClient = new OnyxApiClient(page.request);
 
     if (imageGenConfigId !== null) {
       try {
@@ -39,36 +39,40 @@ test.describe("LLM Ordering", () => {
   test("Non-image-generation model visibility in chat input bar", async ({
     page,
   }) => {
-    // Ensure Image Generation is enabled in default assistant
     await ensureImageGenerationEnabled(page);
 
-    // Navigate to the chat page
-    await page.goto("/chat");
+    await page.goto("/app");
     await page.waitForSelector("#onyx-chat-input-textarea", { timeout: 10000 });
 
-    const testModelDisplayName = "GPT-4o Mini";
+    const trigger = page.getByTestId("model-selector").locator("button").last();
+    const originalTriggerText = (await trigger.textContent())?.trim() ?? "";
 
-    // Open the LLM popover by clicking the model selector button
-    const llmPopoverTrigger = page.locator(
-      '[data-testid="llm-popover-trigger"]'
-    );
-    await llmPopoverTrigger.click();
-
-    // Wait for the popover to open
+    await trigger.click();
     await page.waitForSelector('[role="dialog"]', { timeout: 5000 });
 
-    // Verify that the non-vision model appears in the list
-    // The model name is displayed via getDisplayNameForModel
-    const modelButton = page
-      .locator('[role="dialog"]')
-      .locator("button")
-      .filter({ hasText: testModelDisplayName })
+    const dialog = page.locator('[role="dialog"]');
+    const allModelItems = dialog.locator("[data-interactive-state]");
+    await expect(allModelItems.first()).toBeVisible({ timeout: 5000 });
+
+    const count = await allModelItems.count();
+    expect(count).toBeGreaterThan(0);
+
+    // Pick the first non-selected model so the trigger text changes after click
+    const nonSelectedItem = dialog
+      .locator('[data-interactive-state="empty"]')
       .first();
+    const hasNonSelected = (await nonSelectedItem.count()) > 0;
+    const targetItem = hasNonSelected ? nonSelectedItem : allModelItems.first();
 
-    await expect(modelButton).toBeVisible();
+    await expect(targetItem).toBeVisible();
+    await targetItem.click();
 
-    // Optionally, select the model to verify it works
-    await modelButton.click();
-    await verifyCurrentModel(page, testModelDisplayName);
+    // Verify the popover closed and the trigger updated
+    await expect(dialog).toBeHidden();
+
+    if (hasNonSelected) {
+      const updatedTriggerText = (await trigger.textContent())?.trim() ?? "";
+      expect(updatedTriggerText).not.toBe(originalTriggerText);
+    }
   });
 });

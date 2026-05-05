@@ -2,7 +2,7 @@ import React from "react";
 import Text from "@/refresh-components/texts/Text";
 import { OptionItem } from "./OptionItem";
 import { ComboBoxOption } from "../types";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import { SvgPlus } from "@opal/icons";
 import { sanitizeOptionId } from "../utils/aria";
 
@@ -24,11 +24,13 @@ interface OptionsListProps {
   allowCreate: boolean;
   /** Whether to show create option (pre-computed by parent) */
   showCreateOption: boolean;
+  /** Prefix shown before the typed value in the create option (e.g., "Use", "Add") */
+  createPrefix?: string;
 }
 
 /**
  * Renders the list of options with matched/unmatched sections
- * Includes separator between sections when filtering
+ * Includes divider between sections when filtering
  */
 export const OptionsList: React.FC<OptionsListProps> = ({
   matchedOptions,
@@ -45,6 +47,7 @@ export const OptionsList: React.FC<OptionsListProps> = ({
   inputValue,
   allowCreate,
   showCreateOption,
+  createPrefix,
 }) => {
   // Index offset for other options when create option is shown
   const indexOffset = showCreateOption ? 1 : 0;
@@ -70,7 +73,7 @@ export const OptionsList: React.FC<OptionsListProps> = ({
           data-index={0}
           role="option"
           aria-selected={false}
-          aria-label={`Create "${inputValue}"`}
+          aria-label={`${createPrefix ?? "Create"} "${inputValue}"`}
           onClick={(e) => {
             e.stopPropagation();
             onSelect({ value: inputValue, label: inputValue });
@@ -81,23 +84,53 @@ export const OptionsList: React.FC<OptionsListProps> = ({
           onMouseEnter={() => onMouseEnter(0)}
           onMouseMove={onMouseMove}
           className={cn(
-            "px-3 py-2 cursor-pointer transition-colors",
+            "cursor-pointer transition-colors",
             "flex items-center justify-between rounded-08",
             highlightedIndex === 0 && "bg-background-tint-02",
-            "hover:bg-background-tint-02"
+            "hover:bg-background-tint-02",
+            createPrefix ? "px-1.5 py-1.5" : "px-3 py-2"
           )}
         >
-          <span className="font-main-ui-action text-text-04 truncate min-w-0">
-            {inputValue}
+          <span
+            className={cn(
+              "font-main-ui-action truncate min-w-0",
+              createPrefix ? "px-1" : ""
+            )}
+          >
+            {createPrefix ? (
+              <>
+                <span className="text-text-03">{createPrefix}</span>
+                <span className="text-text-04">{` ${inputValue}`}</span>
+              </>
+            ) : (
+              <span className="text-text-04">{inputValue}</span>
+            )}
           </span>
-          <SvgPlus className="w-4 h-4 text-text-03 flex-shrink-0 ml-2" />
+          <SvgPlus
+            className={cn(
+              "w-4 h-4 flex-shrink-0",
+              createPrefix ? "text-text-04 mx-1" : "text-text-03 ml-2"
+            )}
+          />
         </div>
       )}
+
+      {/* Separator - show when there are options to display */}
+      {separatorLabel &&
+        (matchedOptions.length > 0 ||
+          (!hasSearchTerm && unmatchedOptions.length > 0)) && (
+          <div className="px-3 py-1">
+            <Text as="p" text03 secondaryBody>
+              {separatorLabel}
+            </Text>
+          </div>
+        )}
 
       {/* Matched/Filtered Options */}
       {matchedOptions.map((option, idx) => {
         const globalIndex = idx + indexOffset;
-        const isExact = isExactMatch(option);
+        // Only highlight first exact match, not all matches
+        const isExact = idx === 0 && isExactMatch(option);
         return (
           <OptionItem
             key={option.value}
@@ -115,37 +148,27 @@ export const OptionsList: React.FC<OptionsListProps> = ({
         );
       })}
 
-      {/* Separator - only show if there are unmatched options and a search term */}
-      {hasSearchTerm && unmatchedOptions.length > 0 && (
-        <div className="px-3 py-2 pt-3">
-          <div className="border-t border-border-01 pt-2">
-            <Text as="p" text04 secondaryBody className="text-text-02">
-              {separatorLabel}
-            </Text>
-          </div>
-        </div>
-      )}
-
-      {/* Unmatched Options */}
-      {unmatchedOptions.map((option, idx) => {
-        const globalIndex = matchedOptions.length + idx + indexOffset;
-        const isExact = isExactMatch(option);
-        return (
-          <OptionItem
-            key={option.value}
-            option={option}
-            index={globalIndex}
-            fieldId={fieldId}
-            isHighlighted={globalIndex === highlightedIndex}
-            isSelected={value === option.value}
-            isExact={isExact}
-            onSelect={onSelect}
-            onMouseEnter={onMouseEnter}
-            onMouseMove={onMouseMove}
-            searchTerm={inputValue}
-          />
-        );
-      })}
+      {/* Unmatched Options - only show when NOT searching */}
+      {!hasSearchTerm &&
+        unmatchedOptions.map((option, idx) => {
+          const globalIndex = matchedOptions.length + idx + indexOffset;
+          const isExact = isExactMatch(option);
+          return (
+            <OptionItem
+              key={option.value}
+              option={option}
+              index={globalIndex}
+              fieldId={fieldId}
+              isHighlighted={globalIndex === highlightedIndex}
+              isSelected={value === option.value}
+              isExact={isExact}
+              onSelect={onSelect}
+              onMouseEnter={onMouseEnter}
+              onMouseMove={onMouseMove}
+              searchTerm={inputValue}
+            />
+          );
+        })}
     </>
   );
 };

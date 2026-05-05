@@ -6,29 +6,35 @@ from typing import Any
 from typing import cast
 
 import sentry_sdk
-from celery import bootsteps  # type: ignore
+from celery import bootsteps  # ty: ignore[unresolved-import]
 from celery import Task
-from celery.app import trace
+from celery.app import trace  # ty: ignore[unresolved-import]
 from celery.exceptions import WorkerShutdown
+from celery.signals import before_task_publish
 from celery.signals import task_postrun
 from celery.signals import task_prerun
 from celery.states import READY_STATES
 from celery.utils.log import get_task_logger
-from celery.worker import strategy  # type: ignore
+from celery.worker import strategy  # ty: ignore[unresolved-import]
 from redis.lock import Lock as RedisLock
 from sentry_sdk.integrations.celery import CeleryIntegration
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from onyx import __version__
 from onyx.background.celery.apps.task_formatters import CeleryTaskColoredFormatter
 from onyx.background.celery.apps.task_formatters import CeleryTaskPlainFormatter
 from onyx.background.celery.celery_utils import celery_is_worker_primary
 from onyx.background.celery.celery_utils import make_probe_path
 from onyx.background.celery.tasks.vespa.document_sync import DOCUMENT_SYNC_PREFIX
 from onyx.background.celery.tasks.vespa.document_sync import DOCUMENT_SYNC_TASKSET_KEY
+from onyx.configs.app_configs import DISABLE_VECTOR_DB
+from onyx.configs.app_configs import ENABLE_OPENSEARCH_INDEXING_FOR_ONYX
+from onyx.configs.app_configs import ONYX_DISABLE_VESPA
 from onyx.configs.constants import ONYX_CLOUD_CELERY_TASK_PREFIX
 from onyx.configs.constants import OnyxRedisLocks
 from onyx.db.engine.sql_engine import get_sqlalchemy_engine
+from onyx.document_index.opensearch.client import wait_for_opensearch_with_timeout
 from onyx.document_index.vespa.shared_utils.utils import wait_for_vespa_with_timeout
 from onyx.httpx.httpx_pool import HttpxPool
 from onyx.redis.redis_connector import RedisConnector
@@ -39,6 +45,7 @@ from onyx.redis.redis_connector_prune import RedisConnectorPrune
 from onyx.redis.redis_document_set import RedisDocumentSet
 from onyx.redis.redis_pool import get_redis_client
 from onyx.redis.redis_usergroup import RedisUserGroup
+from onyx.tracing.setup import setup_tracing
 from onyx.utils.logger import ColoredFormatter
 from onyx.utils.logger import LoggerContextVars
 from onyx.utils.logger import PlainFormatter
@@ -46,6 +53,7 @@ from onyx.utils.logger import setup_logger
 from shared_configs.configs import DEV_LOGGING_ENABLED
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
+from shared_configs.configs import SENTRY_CELERY_TRACES_SAMPLE_RATE
 from shared_configs.configs import SENTRY_DSN
 from shared_configs.configs import TENANT_ID_PREFIX
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
@@ -55,10 +63,14 @@ logger = setup_logger()
 task_logger = get_task_logger(__name__)
 
 if SENTRY_DSN:
+    from onyx.configs.sentry import _add_instance_tags
+
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         integrations=[CeleryIntegration()],
-        traces_sample_rate=0.1,
+        traces_sample_rate=SENTRY_CELERY_TRACES_SAMPLE_RATE,
+        release=__version__,
+        before_send=_add_instance_tags,
     )
     logger.info("Sentry initialized")
 else:
@@ -86,14 +98,25 @@ class TenantAwareTask(Task):
             CURRENT_TENANT_ID_CONTEXTVAR.set(None)
 
 
+@before_task_publish.connect
+def on_before_task_publish(
+    headers: dict[str, Any] | None = None,
+    **kwargs: Any,  # noqa: ARG001
+) -> None:
+    """Stamp the current wall-clock time into the task message headers so that
+    workers can compute queue wait time (time between publish and execution)."""
+    if headers is not None:
+        headers["enqueued_at"] = time.time()
+
+
 @task_prerun.connect
 def on_task_prerun(
-    sender: Any | None = None,
-    task_id: str | None = None,
-    task: Task | None = None,
-    args: tuple[Any, ...] | None = None,
-    kwargs: dict[str, Any] | None = None,
-    **other_kwargs: Any,
+    sender: Any | None = None,  # noqa: ARG001
+    task_id: str | None = None,  # noqa: ARG001
+    task: Task | None = None,  # noqa: ARG001
+    args: tuple[Any, ...] | None = None,  # noqa: ARG001
+    kwargs: dict[str, Any] | None = None,  # noqa: ARG001
+    **other_kwargs: Any,  # noqa: ARG001
 ) -> None:
     # Reset any per-task logging context so that prefixes (e.g. pruning_ctx)
     # from a previous task executed in the same worker process do not leak
@@ -105,14 +128,14 @@ def on_task_prerun(
 
 
 def on_task_postrun(
-    sender: Any | None = None,
+    sender: Any | None = None,  # noqa: ARG001
     task_id: str | None = None,
     task: Task | None = None,
-    args: tuple | None = None,
+    args: tuple | None = None,  # noqa: ARG001
     kwargs: dict[str, Any] | None = None,
-    retval: Any | None = None,
+    retval: Any | None = None,  # noqa: ARG001
     state: str | None = None,
-    **kwds: Any,
+    **kwds: Any,  # noqa: ARG001
 ) -> None:
     """We handle this signal in order to remove completed tasks
     from their respective tasksets. This allows us to track the progress of document set
@@ -148,8 +171,7 @@ def on_task_postrun(
         tenant_id = cast(str, kwargs.get("tenant_id", POSTGRES_DEFAULT_SCHEMA))
 
     task_logger.debug(
-        f"Task {task.name} (ID: {task_id}) completed with state: {state} "
-        f"{f'for tenant_id={tenant_id}' if tenant_id else ''}"
+        f"Task {task.name} (ID: {task_id}) completed with state: {state} {f'for tenant_id={tenant_id}' if tenant_id else ''}"
     )
 
     r = get_redis_client(tenant_id=tenant_id)
@@ -204,7 +226,11 @@ def on_task_postrun(
         return
 
 
-def on_celeryd_init(sender: str, conf: Any = None, **kwargs: Any) -> None:
+def on_celeryd_init(
+    sender: str,  # noqa: ARG001
+    conf: Any = None,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
+) -> None:
     """The first signal sent on celery worker startup"""
 
     # NOTE(rkuo): start method "fork" is unsafe and we really need it to be "spawn"
@@ -233,8 +259,11 @@ def on_celeryd_init(sender: str, conf: Any = None, **kwargs: Any) -> None:
         f"Multiprocessing selected start method: {multiprocessing.get_start_method()}"
     )
 
+    # Initialize tracing in workers if credentials are available.
+    setup_tracing()
 
-def wait_for_redis(sender: Any, **kwargs: Any) -> None:
+
+def wait_for_redis(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001
     """Waits for redis to become ready subject to a hardcoded timeout.
     Will raise WorkerShutdown to kill the celery worker if the timeout
     is reached."""
@@ -266,10 +295,7 @@ def wait_for_redis(sender: Any, **kwargs: Any) -> None:
         time.sleep(WAIT_INTERVAL)
 
     if not ready:
-        msg = (
-            f"Redis: Readiness probe did not succeed within the timeout "
-            f"({WAIT_LIMIT} seconds). Exiting..."
-        )
+        msg = f"Redis: Readiness probe did not succeed within the timeout ({WAIT_LIMIT} seconds). Exiting..."
         logger.error(msg)
         raise WorkerShutdown(msg)
 
@@ -277,7 +303,7 @@ def wait_for_redis(sender: Any, **kwargs: Any) -> None:
     return
 
 
-def wait_for_db(sender: Any, **kwargs: Any) -> None:
+def wait_for_db(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001
     """Waits for the db to become ready subject to a hardcoded timeout.
     Will raise WorkerShutdown to kill the celery worker if the timeout is reached."""
 
@@ -308,10 +334,7 @@ def wait_for_db(sender: Any, **kwargs: Any) -> None:
         time.sleep(WAIT_INTERVAL)
 
     if not ready:
-        msg = (
-            f"Database: Readiness probe did not succeed within the timeout "
-            f"({WAIT_LIMIT} seconds). Exiting..."
-        )
+        msg = f"Database: Readiness probe did not succeed within the timeout ({WAIT_LIMIT} seconds). Exiting..."
         logger.error(msg)
         raise WorkerShutdown(msg)
 
@@ -319,7 +342,7 @@ def wait_for_db(sender: Any, **kwargs: Any) -> None:
     return
 
 
-def on_secondary_worker_init(sender: Any, **kwargs: Any) -> None:
+def on_secondary_worker_init(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001
     logger.info(f"Running as a secondary celery worker: pid={os.getpid()}")
 
     # Set up variables for waiting on primary worker
@@ -338,10 +361,7 @@ def on_secondary_worker_init(sender: Any, **kwargs: Any) -> None:
             f"Primary worker is not ready yet. elapsed={time_elapsed:.1f} timeout={WAIT_LIMIT:.1f}"
         )
         if time_elapsed > WAIT_LIMIT:
-            msg = (
-                f"Primary worker was not ready within the timeout. "
-                f"({WAIT_LIMIT} seconds). Exiting..."
-            )
+            msg = f"Primary worker was not ready within the timeout. ({WAIT_LIMIT} seconds). Exiting..."
             logger.error(msg)
             raise WorkerShutdown(msg)
 
@@ -351,7 +371,7 @@ def on_secondary_worker_init(sender: Any, **kwargs: Any) -> None:
     return
 
 
-def on_worker_ready(sender: Any, **kwargs: Any) -> None:
+def on_worker_ready(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001
     task_logger.info("worker_ready signal received.")
 
     # file based way to do readiness/liveness probes
@@ -364,7 +384,7 @@ def on_worker_ready(sender: Any, **kwargs: Any) -> None:
     logger.info(f"Readiness signal touched at {path}.")
 
 
-def on_worker_shutdown(sender: Any, **kwargs: Any) -> None:
+def on_worker_shutdown(sender: Any, **kwargs: Any) -> None:  # noqa: ARG001
     HttpxPool.close_all()
 
     hostname: str = cast(str, sender.hostname)
@@ -397,9 +417,9 @@ def on_worker_shutdown(sender: Any, **kwargs: Any) -> None:
 def on_setup_logging(
     loglevel: int,
     logfile: str | None,
-    format: str,
-    colorize: bool,
-    **kwargs: Any,
+    format: str,  # noqa: ARG001
+    colorize: bool,  # noqa: ARG001
+    **kwargs: Any,  # noqa: ARG001
 ) -> None:
     # TODO: could unhardcode format and colorize and accept these as options from
     # celery's config
@@ -500,25 +520,43 @@ class TenantContextFilter(logging.Filter):
 
 @task_postrun.connect
 def reset_tenant_id(
-    sender: Any | None = None,
-    task_id: str | None = None,
-    task: Task | None = None,
-    args: tuple[Any, ...] | None = None,
-    kwargs: dict[str, Any] | None = None,
-    **other_kwargs: Any,
+    sender: Any | None = None,  # noqa: ARG001
+    task_id: str | None = None,  # noqa: ARG001
+    task: Task | None = None,  # noqa: ARG001
+    args: tuple[Any, ...] | None = None,  # noqa: ARG001
+    kwargs: dict[str, Any] | None = None,  # noqa: ARG001
+    **other_kwargs: Any,  # noqa: ARG001
 ) -> None:
     """Signal handler to reset tenant ID in context var after task ends."""
     CURRENT_TENANT_ID_CONTEXTVAR.set(POSTGRES_DEFAULT_SCHEMA)
 
 
-def wait_for_vespa_or_shutdown(sender: Any, **kwargs: Any) -> None:
-    """Waits for Vespa to become ready subject to a timeout.
-    Raises WorkerShutdown if the timeout is reached."""
+def wait_for_document_index_or_shutdown() -> None:
+    """
+    Waits for all configured document indices to become ready subject to a
+    timeout.
 
-    if not wait_for_vespa_with_timeout():
-        msg = "Vespa: Readiness probe did not succeed within the timeout. Exiting..."
-        logger.error(msg)
-        raise WorkerShutdown(msg)
+    Raises WorkerShutdown if the timeout is reached.
+    """
+    if DISABLE_VECTOR_DB:
+        logger.info(
+            "DISABLE_VECTOR_DB is set — skipping Vespa/OpenSearch readiness check."
+        )
+        return
+
+    if not ONYX_DISABLE_VESPA:
+        if not wait_for_vespa_with_timeout():
+            msg = (
+                "[Vespa] Readiness probe did not succeed within the timeout. Exiting..."
+            )
+            logger.error(msg)
+            raise WorkerShutdown(msg)
+
+    if ENABLE_OPENSEARCH_INDEXING_FOR_ONYX:
+        if not wait_for_opensearch_with_timeout():
+            msg = "[OpenSearch] Readiness probe did not succeed within the timeout. Exiting..."
+            logger.error(msg)
+            raise WorkerShutdown(msg)
 
 
 # File for validating worker liveness
@@ -539,14 +577,42 @@ class LivenessProbe(bootsteps.StartStopStep):
             priority=10,
         )
 
-    def stop(self, worker: Any) -> None:
+    def stop(self, worker: Any) -> None:  # noqa: ARG002
         self.path.unlink(missing_ok=True)
         if self.task_tref:
             self.task_tref.cancel()
 
-    def update_liveness_file(self, worker: Any) -> None:
+    def update_liveness_file(self, worker: Any) -> None:  # noqa: ARG002
         self.path.touch()
 
 
 def get_bootsteps() -> list[type]:
     return [LivenessProbe]
+
+
+# Task modules that require a vector DB (Vespa/OpenSearch).
+# When DISABLE_VECTOR_DB is True these are excluded from autodiscover lists.
+_VECTOR_DB_TASK_MODULES: set[str] = {
+    "onyx.background.celery.tasks.connector_deletion",
+    "onyx.background.celery.tasks.docprocessing",
+    "onyx.background.celery.tasks.docfetching",
+    "onyx.background.celery.tasks.pruning",
+    "onyx.background.celery.tasks.vespa",
+    "onyx.background.celery.tasks.opensearch_migration",
+    "onyx.background.celery.tasks.doc_permission_syncing",
+    "onyx.background.celery.tasks.hierarchyfetching",
+    # EE modules that are vector-DB-dependent
+    "ee.onyx.background.celery.tasks.doc_permission_syncing",
+    "ee.onyx.background.celery.tasks.external_group_syncing",
+}
+# NOTE: "onyx.background.celery.tasks.shared" is intentionally NOT in the set
+# above. It contains celery_beat_heartbeat (which only writes to Redis) alongside
+# document cleanup tasks. The cleanup tasks won't be invoked in minimal mode
+# because the periodic tasks that trigger them are in other filtered modules.
+
+
+def filter_task_modules(modules: list[str]) -> list[str]:
+    """Remove vector-DB-dependent task modules when DISABLE_VECTOR_DB is True."""
+    if not DISABLE_VECTOR_DB:
+        return modules
+    return [m for m in modules if m not in _VECTOR_DB_TASK_MODULES]

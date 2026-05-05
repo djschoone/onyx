@@ -13,9 +13,7 @@ from retry import retry
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.cross_connector_utils.rate_limit_wrapper import (
-    rl_requests,
-)
+from onyx.connectors.cross_connector_utils.rate_limit_wrapper import rl_requests
 from onyx.connectors.exceptions import ConnectorValidationError
 from onyx.connectors.exceptions import CredentialExpiredError
 from onyx.connectors.exceptions import UnexpectedValidationError
@@ -698,8 +696,7 @@ class CodaConnector(LoadConnector, PollConnector):
                 )
             elif e.status_code == 429:
                 raise ConnectorValidationError(
-                    "Validation failed due to Coda rate-limits being exceeded (HTTP 429). "
-                    "Please try again later."
+                    "Validation failed due to Coda rate-limits being exceeded (HTTP 429). Please try again later."
                 )
             else:
                 raise UnexpectedValidationError(

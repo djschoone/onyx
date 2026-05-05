@@ -1,12 +1,13 @@
 import Modal from "@/refresh-components/Modal";
 import Text from "@/refresh-components/texts/Text";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { Callout } from "@/components/ui/callout";
 import {
   CloudEmbeddingProvider,
   getFormattedProviderName,
 } from "../../../../components/embedding/interfaces";
 import { SvgTrash } from "@opal/icons";
+import { markdown } from "@opal/utils";
 
 export interface DeleteCredentialsModalProps {
   modelProvider: CloudEmbeddingProvider;
@@ -21,12 +22,14 @@ export default function DeleteCredentialsModal({
 }: DeleteCredentialsModalProps) {
   return (
     <Modal open onOpenChange={onCancel}>
-      <Modal.Content small>
+      <Modal.Content width="sm" height="sm">
         <Modal.Header
           icon={SvgTrash}
-          title={`Delete ${getFormattedProviderName(
-            modelProvider.provider_type
-          )} Credentials?`}
+          title={markdown(
+            `Delete *${getFormattedProviderName(
+              modelProvider.provider_type
+            )}* credentials?`
+          )}
           onClose={onCancel}
         />
         <Modal.Body>
@@ -38,10 +41,10 @@ export default function DeleteCredentialsModal({
           <Callout type="danger" title="Point of No Return" />
         </Modal.Body>
         <Modal.Footer>
-          <Button secondary onClick={onCancel}>
+          <Button prominence="secondary" onClick={onCancel}>
             Keep Credentials
           </Button>
-          <Button danger onClick={onConfirm}>
+          <Button variant="danger" onClick={onConfirm}>
             Delete Credentials
           </Button>
         </Modal.Footer>

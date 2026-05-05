@@ -99,6 +99,14 @@ STRICT_CHUNK_TOKEN_LIMIT = (
 # Set up Sentry integration (for error logging)
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
 
+# Celery task spans dominate ingestion volume (~94%), so default celery
+# tracing to 0. Web/API traces stay at a small non-zero rate so http.server
+# traces remain available. Both are env-tunable without a code change.
+SENTRY_TRACES_SAMPLE_RATE = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.01"))
+SENTRY_CELERY_TRACES_SAMPLE_RATE = float(
+    os.environ.get("SENTRY_CELERY_TRACES_SAMPLE_RATE", "0.0")
+)
+
 
 # Fields which should only be set on new search setting
 PRESERVED_SEARCH_FIELDS = [
@@ -160,7 +168,9 @@ POSTGRES_DEFAULT_SCHEMA = (
 DEFAULT_REDIS_PREFIX = os.environ.get("DEFAULT_REDIS_PREFIX") or "default"
 
 
-async def async_return_default_schema(*args: Any, **kwargs: Any) -> str:
+async def async_return_default_schema(
+    *args: Any, **kwargs: Any  # noqa: ARG001
+) -> str:  # noqa: ARG001
     return POSTGRES_DEFAULT_SCHEMA
 
 
@@ -189,25 +199,6 @@ IGNORED_SYNCING_TENANT_LIST = (
     else None
 )
 
-# Global flag to skip userfile threshold for all users/tenants
-SKIP_USERFILE_THRESHOLD = (
-    os.environ.get("SKIP_USERFILE_THRESHOLD", "").lower() == "true"
-)
-
-# Comma-separated list of specific tenant IDs to skip threshold (multi-tenant only)
-SKIP_USERFILE_THRESHOLD_TENANT_IDS = os.environ.get(
-    "SKIP_USERFILE_THRESHOLD_TENANT_IDS"
-)
-SKIP_USERFILE_THRESHOLD_TENANT_LIST = (
-    [
-        tenant.strip()
-        for tenant in SKIP_USERFILE_THRESHOLD_TENANT_IDS.split(",")
-        if tenant.strip()
-    ]
-    if SKIP_USERFILE_THRESHOLD_TENANT_IDS
-    else None
-)
-
 ENVIRONMENT = os.environ.get("ENVIRONMENT") or "not_explicitly_set"
 
 
@@ -228,28 +219,28 @@ USAGE_LIMIT_WINDOW_SECONDS = int(os.environ.get("USAGE_LIMIT_WINDOW_SECONDS", "6
 # Per-week LLM usage cost limits in cents (e.g., 1000 = $10.00)
 # Trial users get lower limits than paid users
 USAGE_LIMIT_LLM_COST_CENTS_TRIAL = int(
-    os.environ.get("USAGE_LIMIT_LLM_COST_CENTS_TRIAL", "800")  # $8.00 default
+    os.environ.get("USAGE_LIMIT_LLM_COST_CENTS_TRIAL", "3200")  # $32.00 default
 )
 USAGE_LIMIT_LLM_COST_CENTS_PAID = int(
-    os.environ.get("USAGE_LIMIT_LLM_COST_CENTS_PAID", "1600")  # $16.00 default
+    os.environ.get("USAGE_LIMIT_LLM_COST_CENTS_PAID", "6400")  # $64.00 default
 )
 
 # Per-week chunks indexed limits
 USAGE_LIMIT_CHUNKS_INDEXED_TRIAL = int(
-    os.environ.get("USAGE_LIMIT_CHUNKS_INDEXED_TRIAL", "10000")
+    os.environ.get("USAGE_LIMIT_CHUNKS_INDEXED_TRIAL", 400_000)
 )
 USAGE_LIMIT_CHUNKS_INDEXED_PAID = int(
-    os.environ.get("USAGE_LIMIT_CHUNKS_INDEXED_PAID", "50000")
+    os.environ.get("USAGE_LIMIT_CHUNKS_INDEXED_PAID", 4_000_000)
 )
 
 # Per-week API calls using API keys or Personal Access Tokens
-USAGE_LIMIT_API_CALLS_TRIAL = int(os.environ.get("USAGE_LIMIT_API_CALLS_TRIAL", "100"))
-USAGE_LIMIT_API_CALLS_PAID = int(os.environ.get("USAGE_LIMIT_API_CALLS_PAID", "10000"))
+USAGE_LIMIT_API_CALLS_TRIAL = int(os.environ.get("USAGE_LIMIT_API_CALLS_TRIAL", "0"))
+USAGE_LIMIT_API_CALLS_PAID = int(os.environ.get("USAGE_LIMIT_API_CALLS_PAID", "40000"))
 
 # Per-week non-streaming API calls (more expensive, so lower limits)
 USAGE_LIMIT_NON_STREAMING_CALLS_TRIAL = int(
-    os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_TRIAL", "20")
+    os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_TRIAL", "0")
 )
 USAGE_LIMIT_NON_STREAMING_CALLS_PAID = int(
-    os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_PAID", "40")
+    os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_PAID", "160")
 )

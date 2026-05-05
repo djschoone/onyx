@@ -18,16 +18,20 @@ from onyx.connectors.models import InputType
 from onyx.db.enums import AccessType
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.enums import PermissionSyncStatus
+from onyx.db.enums import ProcessingMode
+from onyx.db.index_attempt_metrics_models import IndexAttemptStage
+from onyx.db.index_attempt_metrics_models import STAGE_SCOPE
+from onyx.db.index_attempt_metrics_models import StageScope
 from onyx.db.models import Connector
 from onyx.db.models import ConnectorCredentialPair
 from onyx.db.models import Credential
 from onyx.db.models import DocPermissionSyncAttempt
 from onyx.db.models import Document as DbDocument
 from onyx.db.models import IndexAttempt
+from onyx.db.models import IndexAttemptStageMetric
 from onyx.db.models import IndexingStatus
 from onyx.db.models import TaskStatus
 from onyx.server.federated.models import FederatedConnectorStatus
-from onyx.server.utils import mask_credential_dict
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
 
 
@@ -133,7 +137,6 @@ class CredentialBase(BaseModel):
     name: str | None = None
     curator_public: bool = False
     groups: list[int] = Field(default_factory=list)
-    is_user_file: bool = False
 
 
 class CredentialSnapshot(CredentialBase):
@@ -145,13 +148,21 @@ class CredentialSnapshot(CredentialBase):
 
     @classmethod
     def from_credential_db_model(cls, credential: Credential) -> "CredentialSnapshot":
+        # Get the credential_json value with appropriate masking
+        if credential.credential_json is None:
+            credential_json_value: dict[str, Any] = {}
+        elif MASK_CREDENTIAL_PREFIX:
+            credential_json_value = credential.credential_json.get_value(
+                apply_mask=True
+            )
+        else:
+            credential_json_value = credential.credential_json.get_value(
+                apply_mask=False
+            )
+
         return CredentialSnapshot(
             id=credential.id,
-            credential_json=(
-                mask_credential_dict(credential.credential_json)
-                if MASK_CREDENTIAL_PREFIX and credential.credential_json
-                else credential.credential_json
-            ),
+            credential_json=credential_json_value,
             user_id=credential.user_id,
             user_email=credential.user.email if credential.user else None,
             admin_public=credential.admin_public,
@@ -201,6 +212,70 @@ class IndexAttemptSnapshot(BaseModel):
             poll_range_start=index_attempt.poll_range_start,
             poll_range_end=index_attempt.poll_range_end,
         )
+
+
+class IndexAttemptStageMetricSnapshot(BaseModel):
+    """Per-stage timing aggregate for a single ``IndexAttempt``.
+
+    ``avg_duration_ms`` and ``std_dev_duration_ms`` are derived at
+    serialization time from the stored ``total_duration_ms`` and
+    ``m2_duration_ms`` (Welford / Chan accumulator). ``std_dev_duration_ms``
+    is undefined for ``event_count <= 1`` and is reported as ``None`` in
+    that case so the frontend can render "avg" without "± std dev".
+    """
+
+    model_config = ConfigDict(use_enum_values=True)
+
+    stage: IndexAttemptStage
+    scope: StageScope
+    event_count: int
+    total_duration_ms: int
+    avg_duration_ms: float | None
+    std_dev_duration_ms: float | None
+    min_duration_ms: int | None
+    max_duration_ms: int | None
+    time_first_event: datetime | None
+    time_last_event: datetime | None
+
+    @classmethod
+    def from_db_model(
+        cls, metric: IndexAttemptStageMetric
+    ) -> "IndexAttemptStageMetricSnapshot":
+        avg = (
+            metric.total_duration_ms / metric.event_count
+            if metric.event_count > 0
+            else None
+        )
+        std_dev = (
+            max(0.0, metric.m2_duration_ms / (metric.event_count - 1)) ** 0.5
+            if metric.event_count > 1
+            else None
+        )
+        return IndexAttemptStageMetricSnapshot(
+            stage=metric.stage,
+            scope=STAGE_SCOPE[metric.stage],
+            event_count=metric.event_count,
+            total_duration_ms=metric.total_duration_ms,
+            avg_duration_ms=avg,
+            std_dev_duration_ms=std_dev,
+            min_duration_ms=metric.min_duration_ms,
+            max_duration_ms=metric.max_duration_ms,
+            time_first_event=metric.time_first_event,
+            time_last_event=metric.time_last_event,
+        )
+
+
+class IndexAttemptStageMetricsResponse(BaseModel):
+    """Response payload for the per-attempt stage-metrics endpoint.
+
+    ``stages`` is returned in the canonical pipeline order (the declaration
+    order of ``IndexAttemptStage``); the frontend renders that order
+    verbatim for the default "Pipeline order" sort and re-sorts client-side
+    for the "Time taken" sort.
+    """
+
+    index_attempt_id: int
+    stages: list[IndexAttemptStageMetricSnapshot]
 
 
 # These are the types currently supported by the pagination hook
@@ -323,6 +398,7 @@ class CCPairFullInfo(BaseModel):
         num_docs_indexed: int,  # not ideal, but this must be computed separately
         is_editable_for_current_user: bool,
         indexing: bool,
+        last_successful_index_time: datetime | None = None,
         last_permission_sync_attempt_status: PermissionSyncStatus | None = None,
         permission_syncing: bool = False,
         last_permission_sync_attempt_finished: datetime | None = None,
@@ -358,7 +434,8 @@ class CCPairFullInfo(BaseModel):
             in_repeated_error_state=cc_pair_model.in_repeated_error_state,
             num_docs_indexed=num_docs_indexed,
             connector=ConnectorSnapshot.from_connector_db_model(
-                cc_pair_model.connector
+                cc_pair_model.connector,
+                credential_ids=[cc_pair_model.credential_id],
             ),
             credential=CredentialSnapshot.from_credential_db_model(
                 cc_pair_model.credential
@@ -374,9 +451,7 @@ class CCPairFullInfo(BaseModel):
             creator_email=(
                 cc_pair_model.creator.email if cc_pair_model.creator else None
             ),
-            last_indexed=(
-                last_index_attempt.time_started if last_index_attempt else None
-            ),
+            last_indexed=last_successful_index_time,
             last_pruned=cc_pair_model.last_pruned,
             last_full_permission_sync=cls._get_last_full_permission_sync(cc_pair_model),
             overall_indexing_speed=overall_indexing_speed,
@@ -400,7 +475,7 @@ class FailedConnectorIndexingStatus(BaseModel):
     """Simplified version of ConnectorIndexingStatus for failed indexing attempts"""
 
     cc_pair_id: int
-    name: str | None
+    name: str
     error_msg: str | None
     is_deletable: bool
     connector_id: int
@@ -414,7 +489,7 @@ class ConnectorStatus(BaseModel):
     """
 
     cc_pair_id: int
-    name: str | None
+    name: str
     connector: ConnectorSnapshot
     credential: CredentialSnapshot
     access_type: AccessType
@@ -445,7 +520,7 @@ class DocsCountOperator(str, Enum):
 
 class ConnectorIndexingStatusLite(BaseModel):
     cc_pair_id: int
-    name: str | None
+    name: str
     source: DocumentSource
     access_type: AccessType
     cc_pair_status: ConnectorCredentialPairStatus
@@ -480,10 +555,11 @@ class ConnectorCredentialPairIdentifier(BaseModel):
 
 
 class ConnectorCredentialPairMetadata(BaseModel):
-    name: str | None = None
+    name: str
     access_type: AccessType
     auto_sync_options: dict[str, Any] | None = None
     groups: list[int] = Field(default_factory=list)
+    processing_mode: ProcessingMode = ProcessingMode.REGULAR
 
 
 class CCStatusUpdateRequest(BaseModel):
@@ -492,7 +568,7 @@ class CCStatusUpdateRequest(BaseModel):
 
 class ConnectorCredentialPairDescriptor(BaseModel):
     id: int
-    name: str | None = None
+    name: str
     connector: ConnectorSnapshot
     credential: CredentialSnapshot
     access_type: AccessType
@@ -502,7 +578,7 @@ class CCPairSummary(BaseModel):
     """Simplified connector-credential pair information with just essential data"""
 
     id: int
-    name: str | None
+    name: str
     source: DocumentSource
     access_type: AccessType
 
@@ -522,6 +598,10 @@ class RunConnectorRequest(BaseModel):
     connector_id: int
     credential_ids: list[int] | None = None
     from_beginning: bool = False
+
+
+class ConnectorRequestSubmission(BaseModel):
+    connector_name: str
 
 
 class CCPropertyUpdateRequest(BaseModel):
@@ -568,7 +648,7 @@ class GoogleServiceAccountCredentialRequest(BaseModel):
 class FileUploadResponse(BaseModel):
     file_paths: list[str]
     file_names: list[str]
-    zip_metadata: dict[str, Any]
+    zip_metadata_file_id: str | None  # File ID pointing to metadata in file store
 
 
 class ConnectorFileInfo(BaseModel):

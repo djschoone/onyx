@@ -1,16 +1,21 @@
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from enum import Enum
 from typing import Any
 from typing import cast
+from typing import Literal
 
 from pydantic import BaseModel
+from pydantic import Field
+from pydantic import field_validator
 from pydantic import model_validator
 
 from onyx.access.models import ExternalAccess
 from onyx.configs.constants import DocumentSource
 from onyx.configs.constants import INDEX_SEPARATOR
 from onyx.configs.constants import RETURN_SEPARATOR
+from onyx.db.enums import HierarchyNodeType
 from onyx.db.enums import IndexModelStatus
 from onyx.utils.text_processing import make_url_compatible
 
@@ -30,17 +35,28 @@ class ConnectorMissingCredentialError(PermissionError):
         )
 
 
+class SectionType(str, Enum):
+    """Discriminator for Section subclasses."""
+
+    TEXT = "text"
+    IMAGE = "image"
+    TABULAR = "tabular"
+
+
 class Section(BaseModel):
     """Base section class with common attributes"""
 
+    type: SectionType
     link: str | None = None
     text: str | None = None
     image_file_id: str | None = None
+    heading: str | None = None
 
 
 class TextSection(Section):
     """Section containing text content"""
 
+    type: Literal[SectionType.TEXT] = SectionType.TEXT
     text: str
 
     def __sizeof__(self) -> int:
@@ -50,10 +66,23 @@ class TextSection(Section):
 class ImageSection(Section):
     """Section containing an image reference"""
 
+    type: Literal[SectionType.IMAGE] = SectionType.IMAGE
     image_file_id: str
 
     def __sizeof__(self) -> int:
         return sys.getsizeof(self.image_file_id) + sys.getsizeof(self.link)
+
+
+class TabularSection(Section):
+    """Section containing tabular data (csv/tsv content, or one sheet of
+    an xlsx workbook rendered as CSV)."""
+
+    type: Literal[SectionType.TABULAR] = SectionType.TABULAR
+    text: str  # CSV representation in a string
+    link: str
+
+    def __sizeof__(self) -> int:
+        return sys.getsizeof(self.text) + sys.getsizeof(self.link)
 
 
 class BasicExpertInfo(BaseModel):
@@ -131,7 +160,6 @@ class BasicExpertInfo(BaseModel):
 
     @classmethod
     def from_dict(cls, model_dict: dict[str, Any]) -> "BasicExpertInfo":
-
         first_name = cast(str, model_dict.get("FirstName"))
         last_name = cast(str, model_dict.get("LastName"))
         email = cast(str, model_dict.get("Email"))
@@ -158,10 +186,20 @@ class DocumentBase(BaseModel):
     """Used for Onyx ingestion api, the ID is inferred before use if not provided"""
 
     id: str | None = None
-    sections: list[TextSection | ImageSection]
+    sections: Sequence[TextSection | ImageSection | TabularSection]
     source: DocumentSource | None = None
     semantic_identifier: str  # displayed in the UI as the main identifier for the doc
+    # TODO(andrei): Ideally we could improve this to where each value is just a
+    # list of strings.
     metadata: dict[str, str | list[str]]
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _coerce_metadata_values(cls, v: dict[str, Any]) -> dict[str, str | list[str]]:
+        return {
+            key: [str(item) for item in val] if isinstance(val, list) else str(val)
+            for key, val in v.items()
+        }
 
     # UTC time
     doc_updated_at: datetime | None = None
@@ -185,6 +223,16 @@ class DocumentBase(BaseModel):
     external_access: ExternalAccess | None = None
     doc_metadata: dict[str, Any] | None = None
 
+    # Parent hierarchy node raw ID - the folder/space/page containing this document
+    # If None, document's hierarchy position is unknown or connector doesn't support hierarchy
+    parent_hierarchy_raw_node_id: str | None = None
+
+    # Resolved database ID of the parent hierarchy node
+    # Set during docfetching after hierarchy nodes are cached
+    parent_hierarchy_node_id: int | None = None
+
+    file_id: str | None = None
+
     def get_title_for_document_index(
         self,
     ) -> str | None:
@@ -202,13 +250,7 @@ class DocumentBase(BaseModel):
         if not self.metadata:
             return None
         # Combined string for the key/value for easy filtering
-        attributes: list[str] = []
-        for k, v in self.metadata.items():
-            if isinstance(v, list):
-                attributes.extend([k + INDEX_SEPARATOR + vi for vi in v])
-            else:
-                attributes.append(k + INDEX_SEPARATOR + v)
-        return attributes
+        return convert_metadata_dict_to_list_of_strings(self.metadata)
 
     def __sizeof__(self) -> int:
         size = sys.getsizeof(self.id)
@@ -240,6 +282,69 @@ class DocumentBase(BaseModel):
         return " ".join([section.text for section in self.sections if section.text])
 
 
+def convert_metadata_dict_to_list_of_strings(
+    metadata: dict[str, str | list[str]],
+) -> list[str]:
+    """Converts a metadata dict to a list of strings.
+
+    Each string is a key-value pair separated by the INDEX_SEPARATOR. If a key
+    points to a list of values, each value generates a unique pair.
+
+    NOTE: Whatever formatting strategy is used here to generate a key-value
+    string must be replicated when constructing query filters.
+
+    Args:
+        metadata: The metadata dict to convert where values can be either a
+            string or a list of strings.
+
+    Returns:
+        A list of strings where each string is a key-value pair separated by the
+            INDEX_SEPARATOR.
+    """
+    attributes: list[str] = []
+    for k, v in metadata.items():
+        if isinstance(v, list):
+            attributes.extend([k + INDEX_SEPARATOR + vi for vi in v])
+        else:
+            attributes.append(k + INDEX_SEPARATOR + v)
+    return attributes
+
+
+def convert_metadata_list_of_strings_to_dict(
+    metadata_list: list[str],
+) -> dict[str, str | list[str]]:
+    """
+    Converts a list of strings to a metadata dict. The inverse of
+    convert_metadata_dict_to_list_of_strings.
+
+    Assumes the input strings are formatted as in the output of
+    convert_metadata_dict_to_list_of_strings.
+
+    The schema of the output metadata dict is suboptimal yet bound to legacy
+    code. Ideally each key would just point to a list of strings, where each
+    list might contain just one element.
+
+    Args:
+        metadata_list: The list of strings to convert to a metadata dict.
+
+    Returns:
+        A metadata dict where values can be either a string or a list of
+            strings.
+    """
+    metadata: dict[str, str | list[str]] = {}
+    for item in metadata_list:
+        key, value = item.split(INDEX_SEPARATOR, 1)
+        if key in metadata:
+            # We have already seen this key therefore it must point to a list.
+            if isinstance(metadata[key], list):
+                cast(list[str], metadata[key]).append(value)
+            else:
+                metadata[key] = [cast(str, metadata[key]), value]
+        else:
+            metadata[key] = value
+    return metadata
+
+
 class Document(DocumentBase):
     """Used for Onyx ingestion api, the ID is required"""
 
@@ -267,6 +372,7 @@ class Document(DocumentBase):
             secondary_owners=base.secondary_owners,
             title=base.title,
             from_ingestion_api=base.from_ingestion_api,
+            file_id=base.file_id,
         )
 
     def __sizeof__(self) -> int:
@@ -293,12 +399,9 @@ class IndexingDocument(Document):
             )
         else:
             section_len = sum(
-                (
-                    len(section.text)
-                    if isinstance(section, TextSection) and section.text is not None
-                    else 0
-                )
+                len(section.text) if section.text is not None else 0
                 for section in self.sections
+                if isinstance(section, (TextSection, TabularSection))
             )
 
         return title_len + section_len
@@ -306,6 +409,42 @@ class IndexingDocument(Document):
 
 class SlimDocument(BaseModel):
     id: str
+    external_access: ExternalAccess | None = None
+    parent_hierarchy_raw_node_id: str | None = None
+
+
+class HierarchyNode(BaseModel):
+    """
+    Hierarchy node yielded by connectors.
+
+    This is the Pydantic model used by connectors, distinct from the
+    SQLAlchemy HierarchyNode model in db/models.py. The connector runner
+    layer converts this to the DB model when persisting to Postgres.
+    """
+
+    # Raw identifier from the source system
+    # e.g., "1h7uWUR2BYZjtMfEXFt43tauj-Gp36DTPtwnsNuA665I" for Google Drive
+    raw_node_id: str
+
+    # Raw ID of parent node, or None for SOURCE-level children (direct children of the source root)
+    raw_parent_id: str | None = None
+
+    # Human-readable name for display
+    display_name: str
+
+    # Link to view this node in the source system
+    link: str | None = None
+
+    # What kind of structural node this is (folder, space, page, etc.)
+    node_type: HierarchyNodeType
+
+    # If this hierarchy node represents a document (e.g., Confluence page),
+    # The db model stores that doc's document_id. This gets set during docprocessing
+    # after the document row is created. Matching is done by raw_node_id matching document.id.
+    # so, we don't allow connectors to specify this as it would be unused
+    # document_id: str | None = None
+
+    # External access information for the node
     external_access: ExternalAccess | None = None
 
 
@@ -348,7 +487,7 @@ class ConnectorFailure(BaseModel):
     failed_document: DocumentFailure | None = None
     failed_entity: EntityFailure | None = None
     failure_message: str
-    exception: Exception | None = None
+    exception: Exception | None = Field(default=None, exclude=True)
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -370,8 +509,9 @@ class ConnectorStopSignal(Exception):
 
 
 class OnyxMetadata(BaseModel):
-    # Note that doc_id cannot be overriden here as it may cause issues
-    # with the display functionalities in the UI. Ask @chris if clarification is needed.
+    # Careful overriding the document_id, may cause visual issues in the UI.
+    # Kept here for API based use cases mostly
+    document_id: str | None = None
     source_type: DocumentSource | None = None
     link: str | None = None
     file_display_name: str | None = None

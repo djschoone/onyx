@@ -15,12 +15,15 @@ from onyx.configs.constants import OnyxCeleryTask
 from onyx.configs.constants import OnyxRedisConstants
 from onyx.db.document import construct_document_id_select_by_needs_sync
 from onyx.db.document import count_documents_by_needs_sync
+from onyx.redis.redis_tenant_work_gating import maybe_mark_tenant_active
 from onyx.utils.logger import setup_logger
 
 # Redis keys for document sync tracking
 DOCUMENT_SYNC_PREFIX = "documentsync"
 DOCUMENT_SYNC_FENCE_KEY = f"{DOCUMENT_SYNC_PREFIX}_fence"
 DOCUMENT_SYNC_TASKSET_KEY = f"{DOCUMENT_SYNC_PREFIX}_taskset"
+FENCE_TTL = 7 * 24 * 60 * 60  # 7 days - defensive TTL to prevent memory leaks
+TASKSET_TTL = FENCE_TTL
 
 logger = setup_logger()
 
@@ -50,7 +53,7 @@ def set_document_sync_fence(r: Redis, payload: int | None) -> None:
         r.delete(DOCUMENT_SYNC_FENCE_KEY)
         return
 
-    r.set(DOCUMENT_SYNC_FENCE_KEY, payload)
+    r.set(DOCUMENT_SYNC_FENCE_KEY, payload, ex=FENCE_TTL)
     r.sadd(OnyxRedisConstants.ACTIVE_FENCES, DOCUMENT_SYNC_FENCE_KEY)
 
 
@@ -110,10 +113,11 @@ def generate_document_sync_tasks(
 
         # Add to the tracking taskset in Redis BEFORE creating the celery task
         r.sadd(DOCUMENT_SYNC_TASKSET_KEY, custom_task_id)
+        r.expire(DOCUMENT_SYNC_TASKSET_KEY, TASKSET_TTL)
 
         # Create the Celery task
         celery_app.send_task(
-            OnyxCeleryTask.VESPA_METADATA_SYNC_TASK,
+            OnyxCeleryTask.DOCUMENT_INDEX_METADATA_SYNC_TASK,
             kwargs=dict(document_id=doc_id, tenant_id=tenant_id),
             queue=OnyxCeleryQueues.VESPA_METADATA_SYNC,
             task_id=custom_task_id,
@@ -146,6 +150,10 @@ def try_generate_stale_document_sync_tasks(
     if stale_doc_count == 0:
         logger.info("No stale documents found. Skipping sync tasks generation.")
         return None
+
+    # Tenant-work-gating hook: refresh this tenant's active-set membership
+    # whenever vespa sync actually has stale docs to dispatch.
+    maybe_mark_tenant_active(tenant_id, caller="vespa_sync")
 
     logger.info(
         f"Stale documents found (at least {stale_doc_count}). Generating sync tasks in one batch."

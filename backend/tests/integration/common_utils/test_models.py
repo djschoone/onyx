@@ -10,7 +10,6 @@ from pydantic import Field
 from onyx.auth.schemas import UserRole
 from onyx.configs.constants import MessageType
 from onyx.configs.constants import QAFeedbackType
-from onyx.context.search.enums import RecencyBiasSetting
 from onyx.context.search.models import SavedSearchDoc
 from onyx.context.search.models import SearchDoc
 from onyx.db.enums import AccessType
@@ -39,6 +38,18 @@ class DATestPAT(BaseModel):
     token_display: str
     created_at: str
     expires_at: str | None = None
+    last_used_at: str | None = None
+
+
+class DATestScimToken(BaseModel):
+    """SCIM bearer token model for testing."""
+
+    id: int
+    name: str
+    raw_token: str | None = None  # Only present on initial creation
+    token_display: str
+    is_active: bool
+    created_at: str
     last_used_at: str | None = None
 
 
@@ -116,7 +127,7 @@ class DATestLLMProvider(BaseModel):
     name: str
     provider: str
     api_key: str
-    default_model_name: str
+    default_model_name: str | None = None
     is_public: bool
     is_auto_mode: bool = False
     groups: list[int]
@@ -150,11 +161,7 @@ class DATestPersona(BaseModel):
     id: int
     name: str
     description: str
-    num_chunks: float
-    llm_relevance_filter: bool
     is_public: bool
-    llm_filter_extraction: bool
-    recency_bias: RecencyBiasSetting
     document_set_ids: list[int]
     tool_ids: list[int]
     llm_model_provider_override: str | None
@@ -162,6 +169,7 @@ class DATestPersona(BaseModel):
     users: list[str]
     groups: list[int]
     label_ids: list[int]
+    is_featured: bool = False
 
     # Embedded prompt fields (no longer separate prompt_ids)
     system_prompt: str | None = None
@@ -202,6 +210,12 @@ class ToolResult(BaseModel):
     images: list[GeneratedImage] = Field(default_factory=list)
 
 
+class ToolCallDebug(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    tool_args: dict[str, Any]
+
+
 class ErrorResponse(BaseModel):
     error: str
     stack_trace: str
@@ -212,6 +226,7 @@ class StreamedResponse(BaseModel):
     assistant_message_id: int
     top_documents: list[SearchDoc]
     used_tools: list[ToolResult]
+    tool_call_debug: list[ToolCallDebug] = Field(default_factory=list)
     error: ErrorResponse | None = None
 
     # Track heartbeat packets for image generation and other tools
@@ -232,7 +247,7 @@ class DATestSettings(BaseModel):
     gpu_enabled: bool | None = None
     product_gating: DATestGatingType = DATestGatingType.NONE
     anonymous_user_enabled: bool | None = None
-    image_extraction_and_analysis_enabled: bool | None = False
+    image_extraction_and_analysis_enabled: bool | None = True
     search_time_image_analysis_enabled: bool | None = False
 
 
@@ -265,3 +280,38 @@ class DATestIndexAttempt:
             ),
             time_updated=datetime.fromisoformat(index_attempt.time_updated),
         )
+
+
+class DATestTool(BaseModel):
+    id: int
+    name: str
+    description: str
+    display_name: str
+    in_code_tool_id: str | None
+
+
+# Discord Bot Models
+class DATestDiscordGuildConfig(BaseModel):
+    """Discord guild config model for testing."""
+
+    id: int
+    registration_key: str | None = None  # Only present on creation
+    guild_id: int | None = None
+    guild_name: str | None = None
+    enabled: bool = True
+    default_persona_id: int | None = None
+
+
+class DATestDiscordChannelConfig(BaseModel):
+    """Discord channel config model for testing."""
+
+    id: int
+    guild_config_id: int
+    channel_id: int
+    channel_name: str
+    channel_type: str
+    is_private: bool
+    enabled: bool = False
+    thread_only_mode: bool = False
+    require_bot_invocation: bool = True
+    persona_override_id: int | None = None

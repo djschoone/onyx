@@ -1,34 +1,29 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Popover,
-  PopoverContent,
-  PopoverMenu,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { cn, noProp } from "@/lib/utils";
+import Popover, { PopoverMenu } from "@/refresh-components/Popover";
+import { noProp } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import UserFilesModal from "@/components/modals/UserFilesModal";
 import { useCreateModal } from "@/refresh-components/contexts/ModalContext";
 import {
   ProjectFile,
   UserFileStatus,
-} from "@/app/chat/projects/projectsService";
+} from "@/app/app/projects/projectsService";
 import LineItem from "@/refresh-components/buttons/LineItem";
 import IconButton from "@/refresh-components/buttons/IconButton";
-import { usePopup } from "@/components/admin/connectors/Popup";
-import { useProjectsContext } from "@/app/chat/projects/ProjectsContext";
+import { toast } from "@/hooks/useToast";
+import { useProjectsContext } from "@/providers/ProjectsContext";
 import Text from "@/refresh-components/texts/Text";
 import { MAX_FILES_TO_SHOW } from "@/lib/constants";
 import { isImageFile } from "@/lib/utils";
 import {
   SvgExternalLink,
   SvgFileText,
-  SvgFiles,
   SvgImage,
   SvgLoader,
   SvgMoreHorizontal,
-  SvgPaperclip,
+  SvgUploadSquare,
 } from "@opal/icons";
 const getFileExtension = (fileName: string): string => {
   const idx = fileName.lastIndexOf(".");
@@ -79,6 +74,7 @@ function FileLineItem({
       }
       rightChildren={
         <div className="h-[1rem] flex flex-col justify-center">
+          {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
           <IconButton
             icon={SvgExternalLink}
             onClick={noProp(() => onFileClick(projectFile))}
@@ -125,12 +121,12 @@ function FilePickerPopoverContents({
   const quickAccessFiles = recentFiles.slice(0, MAX_FILES_TO_SHOW);
 
   return (
-    <PopoverMenu medium>
+    <PopoverMenu>
       {[
         // Action button to upload more files
         <LineItem
           key="upload-files"
-          icon={SvgPaperclip}
+          icon={SvgUploadSquare}
           description="Upload a file from your device"
           onClick={triggerUploadPicker}
         >
@@ -195,7 +191,6 @@ export default function FilePickerPopover({
   const [recentFilesSnapshot, setRecentFilesSnapshot] = useState<ProjectFile[]>(
     []
   );
-  const { popup, setPopup } = usePopup();
   const { deleteUserFile, setCurrentMessageFiles } = useProjectsContext();
   const [deletedFileIds, setDeletedFileIds] = useState<string[]>([]);
 
@@ -217,10 +212,7 @@ export default function FilePickerPopover({
     deleteUserFile(file.id)
       .then((result) => {
         if (!result.has_associations) {
-          setPopup({
-            message: "File deleted successfully",
-            type: "success",
-          });
+          toast.success("File deleted successfully");
           setCurrentMessageFiles((prev) =>
             prev.filter((f) => f.id !== file.id)
           );
@@ -245,10 +237,7 @@ export default function FilePickerPopover({
             message += `assistants: ${assistants}`;
           }
 
-          setPopup({
-            message: message,
-            type: "error",
-          });
+          toast.error(message);
         }
       })
       .catch((error) => {
@@ -256,10 +245,7 @@ export default function FilePickerPopover({
         setRecentFilesSnapshot((prev) =>
           prev.map((f) => (f.id === file.id ? { ...f, status: lastStatus } : f))
         );
-        setPopup({
-          message: "Failed to delete file. Please try again.",
-          type: "error",
-        });
+        toast.error("Failed to delete file. Please try again.");
         // Useful for debugging; safe in client components
         console.error("Failed to delete file", error);
       });
@@ -267,8 +253,6 @@ export default function FilePickerPopover({
 
   return (
     <>
-      {popup}
-
       <input
         ref={fileInputRef}
         type="file"
@@ -297,10 +281,10 @@ export default function FilePickerPopover({
       </recentFilesModal.Provider>
 
       <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger asChild>
+        <Popover.Trigger asChild>
           {typeof trigger === "function" ? trigger(open) : trigger}
-        </PopoverTrigger>
-        <PopoverContent align="start" side="bottom">
+        </Popover.Trigger>
+        <Popover.Content align="start" side="bottom" width="lg">
           <FilePickerPopoverContents
             recentFiles={recentFilesSnapshot}
             onPickRecent={(file) => {
@@ -321,7 +305,7 @@ export default function FilePickerPopover({
               setOpen(false);
             }}
           />
-        </PopoverContent>
+        </Popover.Content>
       </Popover>
     </>
   );

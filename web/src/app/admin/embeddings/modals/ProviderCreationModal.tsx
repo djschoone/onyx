@@ -1,19 +1,20 @@
 import React, { useRef, useState } from "react";
 import Text from "@/refresh-components/texts/Text";
 import { Callout } from "@/components/ui/callout";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { Formik, Form } from "formik";
 import * as Yup from "yup";
 import { Label, TextFormField } from "@/components/Field";
-import { LoadingAnimation } from "@/components/Loading";
 import {
   CloudEmbeddingProvider,
   EmbeddingProvider,
   getFormattedProviderName,
 } from "@/components/embedding/interfaces";
-import { EMBEDDING_PROVIDERS_ADMIN_URL } from "@/app/admin/configuration/llm/constants";
+import { EMBEDDING_PROVIDERS_ADMIN_URL } from "@/lib/llmConfig/constants";
 import Modal from "@/refresh-components/Modal";
+import { markdown } from "@opal/utils";
 import { SvgSettings } from "@opal/icons";
+import SimpleLoader from "@/refresh-components/loaders/SimpleLoader";
 export interface ProviderCreationModalProps {
   updateCurrentModel: (
     newModel: string,
@@ -39,7 +40,6 @@ export default function ProviderCreationModal({
   const useFileUpload =
     selectedProvider.provider_type == EmbeddingProvider.GOOGLE;
 
-  const [isProcessing, setIsProcessing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [fileName, setFileName] = useState<string>("");
 
@@ -110,7 +110,6 @@ export default function ProviderCreationModal({
     values: any,
     { setSubmitting }: { setSubmitting: (isSubmitting: boolean) => void }
   ) => {
-    setIsProcessing(true);
     setErrorMsg("");
     try {
       const customConfig = Object.fromEntries(values.custom_config);
@@ -141,7 +140,6 @@ export default function ProviderCreationModal({
       if (!initialResponse.ok) {
         const errorMsg = (await initialResponse.json()).detail;
         setErrorMsg(errorMsg);
-        setIsProcessing(false);
         setSubmitting(false);
         return;
       }
@@ -179,19 +177,20 @@ export default function ProviderCreationModal({
         setErrorMsg("An unknown error occurred");
       }
     } finally {
-      setIsProcessing(false);
       setSubmitting(false);
     }
   };
 
   return (
     <Modal open onOpenChange={onCancel}>
-      <Modal.Content small>
+      <Modal.Content width="sm" height="sm">
         <Modal.Header
           icon={SvgSettings}
-          title={`Configure ${getFormattedProviderName(
-            selectedProvider.provider_type
-          )}`}
+          title={markdown(
+            `Configure *${getFormattedProviderName(
+              selectedProvider.provider_type
+            )}*`
+          )}
           onClose={onCancel}
         />
         <Modal.Body>
@@ -301,17 +300,16 @@ export default function ProviderCreationModal({
                 )}
 
                 <Button
-                  type="submit"
-                  className="w-full"
                   disabled={isSubmitting}
+                  type="submit"
+                  width="full"
+                  icon={isSubmitting ? SimpleLoader : undefined}
                 >
-                  {isProcessing ? (
-                    <LoadingAnimation />
-                  ) : existingProvider ? (
-                    "Update"
-                  ) : (
-                    "Create"
-                  )}
+                  {isSubmitting
+                    ? "Submitting"
+                    : existingProvider
+                      ? "Update"
+                      : "Create"}
                 </Button>
               </Form>
             )}

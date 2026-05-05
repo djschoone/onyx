@@ -7,7 +7,7 @@ from typing import Dict
 
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
-from googleapiclient.errors import HttpError  # type: ignore
+from googleapiclient.errors import HttpError
 
 from onyx.access.models import ExternalAccess
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
@@ -40,13 +40,13 @@ from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorCheckpoint
 from onyx.connectors.models import Document
 from onyx.connectors.models import DocumentFailure
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import SlimDocument
 from onyx.connectors.models import TextSection
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.logger import setup_logger
 from onyx.utils.retry_wrapper import retry_builder
-
 
 logger = setup_logger()
 
@@ -252,7 +252,17 @@ def thread_to_document(
 
     updated_at_datetime = None
     if updated_at:
-        updated_at_datetime = time_str_to_utc(updated_at)
+        try:
+            updated_at_datetime = time_str_to_utc(updated_at)
+        except (ValueError, OverflowError) as e:
+            # Old mailboxes contain RFC-violating Date headers. Drop the
+            # timestamp instead of aborting the indexing run.
+            logger.warning(
+                "Skipping unparseable Gmail Date header on thread %s: %r (%s)",
+                full_thread.get("id"),
+                updated_at,
+                e,
+            )
 
     id = full_thread.get("id")
     if not id:
@@ -295,7 +305,9 @@ def _full_thread_from_id(
     try:
         thread = next(
             execute_single_retrieval(
-                retrieval_function=gmail_service.users().threads().get,
+                retrieval_function=gmail_service.users()  # ty: ignore[unresolved-attribute]
+                .threads()
+                .get,
                 list_key=None,
                 userId=user_email,
                 fields=THREAD_FIELDS,
@@ -320,7 +332,7 @@ def _full_thread_from_id(
 def _slim_thread_from_id(
     thread_id: str,
     user_email: str,
-    gmail_service: GmailService,
+    gmail_service: GmailService,  # noqa: ARG001
 ) -> SlimDocument:
     return SlimDocument(
         id=thread_id,
@@ -350,9 +362,7 @@ class GmailConnector(
     def primary_admin_email(self) -> str:
         if self._primary_admin_email is None:
             raise RuntimeError(
-                "Primary admin email missing, "
-                "should not call this property "
-                "before calling load_credentials"
+                "Primary admin email missing, should not call this property before calling load_credentials"
             )
         return self._primary_admin_email
 
@@ -360,9 +370,7 @@ class GmailConnector(
     def google_domain(self) -> str:
         if self._primary_admin_email is None:
             raise RuntimeError(
-                "Primary admin email missing, "
-                "should not call this property "
-                "before calling load_credentials"
+                "Primary admin email missing, should not call this property before calling load_credentials"
             )
         return self._primary_admin_email.split("@")[-1]
 
@@ -370,9 +378,7 @@ class GmailConnector(
     def creds(self) -> OAuthCredentials | ServiceAccountCredentials:
         if self._creds is None:
             raise RuntimeError(
-                "Creds missing, "
-                "should not call this property "
-                "before calling load_credentials"
+                "Creds missing, should not call this property before calling load_credentials"
             )
         return self._creds
 
@@ -390,14 +396,16 @@ class GmailConnector(
         """
         List all user emails if we are on a Google Workspace domain.
         If the domain is gmail.com, or if we attempt to call the Admin SDK and
-        get a 404, fall back to using the single user.
+        get a 404 or 403, fall back to using the single user.
+        A 404 indicates a personal Gmail account with no Workspace domain.
+        A 403 indicates insufficient permissions (e.g., OAuth user without admin privileges).
         """
 
         try:
             admin_service = get_admin_service(self.creds, self.primary_admin_email)
             emails = []
             for user in execute_paginated_retrieval(
-                retrieval_function=admin_service.users().list,
+                retrieval_function=admin_service.users().list,  # ty: ignore[unresolved-attribute]
                 list_key="users",
                 fields=USER_FIELDS,
                 domain=self.google_domain,
@@ -413,6 +421,13 @@ class GmailConnector(
                     "with no Workspace domain. Falling back to single user."
                 )
                 return [self.primary_admin_email]
+            elif e.resp.status == 403:
+                logger.warning(
+                    "Received 403 from Admin SDK; this may indicate insufficient permissions "
+                    "(e.g., OAuth user without admin privileges or service account without "
+                    "domain-wide delegation). Falling back to single user."
+                )
+                return [self.primary_admin_email]
             raise
 
     def _fetch_threads_impl(
@@ -422,11 +437,11 @@ class GmailConnector(
         time_range_end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,
         page_token: str | None = None,
-        set_page_token: Callable[[str | None], None] = lambda x: None,
+        set_page_token: Callable[[str | None], None] = lambda x: None,  # noqa: ARG005
         is_slim: bool = False,
     ) -> Iterator[Document | ConnectorFailure] | GenerateSlimDocumentOutput:
         query = _build_time_range_query(time_range_start, time_range_end)
-        slim_doc_batch: list[SlimDocument] = []
+        slim_doc_batch: list[SlimDocument | HierarchyNode] = []
         logger.info(
             f"Fetching {'slim' if is_slim else 'full'} threads for user: {user_email}"
         )
@@ -434,7 +449,9 @@ class GmailConnector(
         try:
             for thread in execute_paginated_retrieval_with_max_pages(
                 max_num_pages=PAGES_PER_CHECKPOINT,
-                retrieval_function=gmail_service.users().threads().list,
+                retrieval_function=gmail_service.users()  # ty: ignore[unresolved-attribute]
+                .threads()
+                .list,
                 list_key="threads",
                 userId=user_email,
                 fields=THREAD_LIST_FIELDS,
@@ -494,7 +511,7 @@ class GmailConnector(
         self,
         user_email: str,
         page_token: str | None = None,
-        set_page_token: Callable[[str | None], None] = lambda x: None,
+        set_page_token: Callable[[str | None], None] = lambda x: None,  # noqa: ARG005
         time_range_start: SecondsSinceUnixEpoch | None = None,
         time_range_end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,
@@ -516,7 +533,7 @@ class GmailConnector(
         self,
         user_email: str,
         page_token: str | None = None,
-        set_page_token: Callable[[str | None], None] = lambda x: None,
+        set_page_token: Callable[[str | None], None] = lambda x: None,  # noqa: ARG005
         time_range_start: SecondsSinceUnixEpoch | None = None,
         time_range_end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,

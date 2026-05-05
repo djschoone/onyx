@@ -3,7 +3,6 @@ from typing import Any
 
 from redis.lock import Lock as RedisLock
 
-from onyx.background.celery.tasks.kg_processing.utils import extend_lock
 from onyx.configs.constants import CELERY_GENERIC_BEAT_LOCK_TIMEOUT
 from onyx.db.connector import get_kg_enabled_connectors
 from onyx.db.document import get_document_updated_at
@@ -29,17 +28,14 @@ from onyx.kg.models import KGEntityTypeInstructions
 from onyx.kg.models import KGExtractionInstructions
 from onyx.kg.models import KGImpliedExtractionResults
 from onyx.kg.utils.extraction_utils import EntityTypeMetadataTracker
-from onyx.kg.utils.extraction_utils import (
-    get_batch_documents_metadata,
-)
+from onyx.kg.utils.extraction_utils import get_batch_documents_metadata
 from onyx.kg.utils.extraction_utils import kg_deep_extraction
-from onyx.kg.utils.extraction_utils import (
-    kg_implied_extraction,
-)
+from onyx.kg.utils.extraction_utils import kg_implied_extraction
 from onyx.kg.utils.formatting_utils import extract_relationship_type_id
 from onyx.kg.utils.formatting_utils import get_entity_type
 from onyx.kg.utils.formatting_utils import split_entity_id
 from onyx.kg.utils.formatting_utils import split_relationship_id
+from onyx.kg.utils.lock_utils import extend_lock
 from onyx.utils.logger import setup_logger
 from onyx.utils.threadpool_concurrency import run_functions_tuples_in_parallel
 
@@ -279,8 +275,7 @@ def kg_extraction(
 
             if len(unprocessed_document_batch) == 0:
                 logger.info(
-                    f"No unprocessed documents found for connector {connector_id}. "
-                    f"Processed {document_batch_counter} batches."
+                    f"No unprocessed documents found for connector {connector_id}. Processed {document_batch_counter} batches."
                 )
                 break
 

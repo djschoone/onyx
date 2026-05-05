@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import psycopg2
 import requests
-
 from alembic import command
 from alembic.config import Config
+
 from onyx.configs.app_configs import POSTGRES_HOST
 from onyx.configs.app_configs import POSTGRES_PASSWORD
 from onyx.configs.app_configs import POSTGRES_PORT
@@ -24,8 +24,8 @@ from onyx.document_index.vespa.index import DOCUMENT_ID_ENDPOINT
 from onyx.document_index.vespa.index import VespaIndex
 from onyx.file_store.file_store import get_default_file_store
 from onyx.indexing.models import IndexingSetting
+from onyx.setup import setup_document_indices
 from onyx.setup import setup_postgres
-from onyx.setup import setup_vespa
 from onyx.utils.logger import setup_logger
 from tests.integration.common_utils.timeout import run_with_timeout_multiproc
 
@@ -48,8 +48,8 @@ def _run_migrations(
     alembic_cfg.attributes["configure_logger"] = False
     alembic_cfg.config_ini_section = config_name
 
-    alembic_cfg.cmd_opts = SimpleNamespace()  # type: ignore
-    alembic_cfg.cmd_opts.x = [f"schema={schema}"]  # type: ignore
+    alembic_cfg.cmd_opts = SimpleNamespace()  # ty: ignore[invalid-assignment]
+    alembic_cfg.cmd_opts.x = [f"schema={schema}"]  # ty: ignore[invalid-assignment]
 
     # Set the SQLAlchemy URL in the Alembic configuration
     alembic_cfg.set_main_option("sqlalchemy.url", database_url)
@@ -302,13 +302,15 @@ def reset_vespa() -> None:
         multipass_config = get_multipass_config(search_settings)
         index_name = search_settings.index_name
 
-    success = setup_vespa(
-        document_index=VespaIndex(
-            index_name=index_name,
-            secondary_index_name=None,
-            large_chunks_enabled=multipass_config.enable_large_chunks,
-            secondary_large_chunks_enabled=None,
-        ),
+    success = setup_document_indices(
+        document_indices=[
+            VespaIndex(
+                index_name=index_name,
+                secondary_index_name=None,
+                large_chunks_enabled=multipass_config.enable_large_chunks,
+                secondary_large_chunks_enabled=None,
+            )
+        ],
         index_setting=IndexingSetting.from_db_model(search_settings),
         secondary_index_setting=None,
     )
@@ -358,13 +360,15 @@ def reset_vespa_multitenant() -> None:
             multipass_config = get_multipass_config(search_settings)
             index_name = search_settings.index_name
 
-        success = setup_vespa(
-            document_index=VespaIndex(
-                index_name=index_name,
-                secondary_index_name=None,
-                large_chunks_enabled=multipass_config.enable_large_chunks,
-                secondary_large_chunks_enabled=None,
-            ),
+        success = setup_document_indices(
+            document_indices=[
+                VespaIndex(
+                    index_name=index_name,
+                    secondary_index_name=None,
+                    large_chunks_enabled=multipass_config.enable_large_chunks,
+                    secondary_large_chunks_enabled=None,
+                )
+            ],
             index_setting=IndexingSetting.from_db_model(search_settings),
             secondary_index_setting=None,
         )

@@ -1,9 +1,11 @@
 import json
+import mimetypes
 
 from sqlalchemy.orm import Session
 
+from onyx.chat.chat_state import ChatStateContainer
+from onyx.chat.chat_state import SearchDocKey
 from onyx.configs.constants import DocumentSource
-from onyx.context.search.models import CitationDocInfo
 from onyx.context.search.models import SearchDoc
 from onyx.db.chat import add_search_docs_to_chat_message
 from onyx.db.chat import add_search_docs_to_tool_call
@@ -11,28 +13,40 @@ from onyx.db.chat import create_db_search_doc
 from onyx.db.models import ChatMessage
 from onyx.db.models import ToolCall
 from onyx.db.tools import create_tool_call_no_commit
+from onyx.file_store.models import FileDescriptor
 from onyx.natural_language_processing.utils import BaseTokenizer
 from onyx.natural_language_processing.utils import get_tokenizer
+from onyx.server.query_and_chat.chat_utils import mime_type_to_chat_file_type
 from onyx.tools.models import ToolCallInfo
 from onyx.utils.logger import setup_logger
+from onyx.utils.postgres_sanitization import sanitize_string
 
 logger = setup_logger()
 
 
-def _create_search_doc_key(search_doc: SearchDoc) -> tuple[str, int, tuple[str, ...]]:
-    """
-    Create a unique key for a SearchDoc that accounts for different versions of the same
-    document/chunk with different match_highlights.
-
-    Args:
-        search_doc: The SearchDoc pydantic model to create a key for
-
-    Returns:
-        A tuple of (document_id, chunk_ind, sorted match_highlights) that uniquely identifies
-        this specific version of the document
-    """
-    match_highlights_tuple = tuple(sorted(search_doc.match_highlights or []))
-    return (search_doc.document_id, search_doc.chunk_ind, match_highlights_tuple)
+def _extract_referenced_file_descriptors(
+    tool_calls: list[ToolCallInfo],
+    message_text: str,
+) -> list[FileDescriptor]:
+    """Extract FileDescriptors for code interpreter files referenced in the message text."""
+    descriptors: list[FileDescriptor] = []
+    for tool_call_info in tool_calls:
+        if not tool_call_info.generated_files:
+            continue
+        for gen_file in tool_call_info.generated_files:
+            file_id = (
+                gen_file.file_link.rsplit("/", 1)[-1] if gen_file.file_link else ""
+            )
+            if file_id and file_id in message_text:
+                mime_type, _ = mimetypes.guess_type(gen_file.filename)
+                descriptors.append(
+                    FileDescriptor(
+                        id=file_id,
+                        type=mime_type_to_chat_file_type(mime_type),
+                        name=gen_file.filename,
+                    )
+                )
+    return descriptors
 
 
 def _create_and_link_tool_calls(
@@ -73,8 +87,7 @@ def _create_and_link_tool_calls(
             tool_call_tokens = len(default_tokenizer.encode(arguments_json_str))
         except Exception as e:
             logger.warning(
-                f"Failed to tokenize tool call arguments for {tool_call_info.tool_call_id}: {e}. "
-                f"Using length as (over) estimate."
+                f"Failed to tokenize tool call arguments for {tool_call_info.tool_call_id}: {e}. Using length as (over) estimate."
             )
             arguments_json_str = json.dumps(tool_call_info.tool_call_arguments)
             tool_call_tokens = len(arguments_json_str)
@@ -154,99 +167,110 @@ def save_chat_turn(
     message_text: str,
     reasoning_tokens: str | None,
     tool_calls: list[ToolCallInfo],
-    citation_docs_info: list[CitationDocInfo],
+    citation_to_doc: dict[int, SearchDoc],
+    all_search_docs: dict[SearchDocKey, SearchDoc],
     db_session: Session,
     assistant_message: ChatMessage,
     is_clarification: bool = False,
+    emitted_citations: set[int] | None = None,
+    pre_answer_processing_time: float | None = None,
 ) -> None:
     """
     Save a chat turn by populating the assistant_message and creating related entities.
 
     This function:
     1. Updates the ChatMessage with text, reasoning tokens, and token count
-    2. Creates SearchDoc entries from ToolCall search_docs (for tool calls that returned documents)
-    3. Collects all unique SearchDocs from all tool calls and links them to ChatMessage
-    4. Builds citation mapping from citation_docs_info
-    5. Links all unique SearchDocs from tool calls to the ChatMessage
+    2. Creates DB SearchDoc entries from pre-deduplicated all_search_docs
+    3. Builds tool_call -> search_doc mapping for displayed docs
+    4. Builds citation mapping from citation_to_doc
+    5. Links all unique SearchDocs to the ChatMessage
     6. Creates ToolCall entries and links SearchDocs to them
     7. Builds the citations mapping for the ChatMessage
-
-    Deduplication Logic:
-    - SearchDocs are deduplicated using (document_id, chunk_ind, match_highlights) as the key
-    - This ensures that the same document/chunk with different match_highlights (from different
-      queries) are stored as separate SearchDoc entries
-    - Each ToolCall and ChatMessage will map to the correct version of the SearchDoc that
-      matches its specific query highlights
 
     Args:
         message_text: The message content to save
         reasoning_tokens: Optional reasoning tokens for the message
         tool_calls: List of tool call information to create ToolCall entries (may include search_docs)
-        citation_docs_info: List of citation document information for building citations mapping
+        citation_to_doc: Mapping from citation number to SearchDoc for building citations
+        all_search_docs: Pre-deduplicated search docs from ChatStateContainer
         db_session: Database session for persistence
         assistant_message: The ChatMessage object to populate (should already exist in DB)
         is_clarification: Whether this assistant message is a clarification question (deep research flow)
+        emitted_citations: Set of citation numbers that were actually emitted during streaming.
+            If provided, only citations in this set will be saved; others are filtered out.
+        pre_answer_processing_time: Duration of processing before answer starts (in seconds)
     """
     # 1. Update ChatMessage with message content, reasoning tokens, and token count
-    assistant_message.message = message_text
-    assistant_message.reasoning_tokens = reasoning_tokens
+    sanitized_message_text = (
+        sanitize_string(message_text) if message_text else message_text
+    )
+    assistant_message.message = sanitized_message_text
+    assistant_message.reasoning_tokens = (
+        sanitize_string(reasoning_tokens) if reasoning_tokens else reasoning_tokens
+    )
     assistant_message.is_clarification = is_clarification
+
+    # Use pre-answer processing time (captured when MESSAGE_START was emitted)
+    if pre_answer_processing_time is not None:
+        assistant_message.processing_duration_seconds = pre_answer_processing_time
 
     # Calculate token count using default tokenizer, when storing, this should not use the LLM
     # specific one so we use a system default tokenizer here.
     default_tokenizer = get_tokenizer(None, None)
-    if message_text:
-        assistant_message.token_count = len(default_tokenizer.encode(message_text))
+    if sanitized_message_text:
+        assistant_message.token_count = len(
+            default_tokenizer.encode(sanitized_message_text)
+        )
     else:
         assistant_message.token_count = 0
 
-    # 2. Create SearchDoc entries from tool_calls
-    # Build mapping from SearchDoc to DB SearchDoc ID
-    # Use (document_id, chunk_ind, match_highlights) as key to avoid duplicates
-    # while ensuring different versions with different highlights are stored separately
-    search_doc_key_to_id: dict[tuple[str, int, tuple[str, ...]], int] = {}
-    tool_call_to_search_doc_ids: dict[str, list[int]] = {}
+    # 2. Create DB SearchDoc entries from pre-deduplicated all_search_docs
+    search_doc_key_to_id: dict[SearchDocKey, int] = {}
+    for key, search_doc_py in all_search_docs.items():
+        db_search_doc = create_db_search_doc(
+            server_search_doc=search_doc_py,
+            db_session=db_session,
+            commit=False,
+        )
+        search_doc_key_to_id[key] = db_search_doc.id
 
-    # Process tool calls and their search docs
+    # 3. Build tool_call -> search_doc mapping (for displayed docs in each tool call)
+    tool_call_to_search_doc_ids: dict[str, list[int]] = {}
     for tool_call_info in tool_calls:
         if tool_call_info.search_docs:
             search_doc_ids_for_tool: list[int] = []
             for search_doc_py in tool_call_info.search_docs:
-                # Create a unique key for this SearchDoc version
-                search_doc_key = _create_search_doc_key(search_doc_py)
-
-                # Check if we've already created this exact SearchDoc version
-                if search_doc_key in search_doc_key_to_id:
-                    search_doc_ids_for_tool.append(search_doc_key_to_id[search_doc_key])
+                key = ChatStateContainer.create_search_doc_key(search_doc_py)
+                if key in search_doc_key_to_id:
+                    search_doc_ids_for_tool.append(search_doc_key_to_id[key])
                 else:
-                    # Create new DB SearchDoc entry
+                    # Displayed doc not in all_search_docs - create it
+                    # This can happen if displayed_docs contains docs not in search_docs
                     db_search_doc = create_db_search_doc(
                         server_search_doc=search_doc_py,
                         db_session=db_session,
                         commit=False,
                     )
-                    search_doc_key_to_id[search_doc_key] = db_search_doc.id
+                    search_doc_key_to_id[key] = db_search_doc.id
                     search_doc_ids_for_tool.append(db_search_doc.id)
-
             tool_call_to_search_doc_ids[tool_call_info.tool_call_id] = list(
                 set(search_doc_ids_for_tool)
             )
 
-    # 3. Collect all unique SearchDoc IDs from all tool calls to link to ChatMessage
-    # Use a set to deduplicate by ID (since we've already deduplicated by key above)
-    all_search_doc_ids_set: set[int] = set()
-    for search_doc_ids in tool_call_to_search_doc_ids.values():
-        all_search_doc_ids_set.update(search_doc_ids)
+    # Collect all search doc IDs for ChatMessage linking
+    all_search_doc_ids_set: set[int] = set(search_doc_key_to_id.values())
 
-    # 4. Build citation mapping from citation_docs_info
+    # 4. Build a citation mapping from the citation number to the saved DB SearchDoc ID
+    # Only include citations that were actually emitted during streaming
     citation_number_to_search_doc_id: dict[int, int] = {}
 
-    for citation_doc_info in citation_docs_info:
-        # Extract SearchDoc pydantic model
-        search_doc_py = citation_doc_info.search_doc
+    for citation_num, search_doc_py in citation_to_doc.items():
+        # Skip citations that weren't actually emitted (if emitted_citations is provided)
+        if emitted_citations is not None and citation_num not in emitted_citations:
+            continue
 
         # Create the unique key for this SearchDoc version
-        search_doc_key = _create_search_doc_key(search_doc_py)
+        search_doc_key = ChatStateContainer.create_search_doc_key(search_doc_py)
 
         # Get the search doc ID (should already exist from processing tool_calls)
         if search_doc_key in search_doc_key_to_id:
@@ -283,10 +307,7 @@ def save_chat_turn(
                 all_search_doc_ids_set.add(db_search_doc_id)
 
         # Build mapping from citation number to search doc ID
-        if citation_doc_info.citation_number is not None:
-            citation_number_to_search_doc_id[citation_doc_info.citation_number] = (
-                db_search_doc_id
-            )
+        citation_number_to_search_doc_id[citation_num] = db_search_doc_id
 
     # 5. Link all unique SearchDocs (from both tool calls and citations) to ChatMessage
     final_search_doc_ids: list[int] = list(all_search_doc_ids_set)
@@ -306,23 +327,21 @@ def save_chat_turn(
         tool_call_to_search_doc_ids=tool_call_to_search_doc_ids,
     )
 
-    # 7. Build citations mapping from citation_docs_info
-    # Any citation_doc_info with a citation_number appeared in the text and should be mapped
-    citations: dict[int, int] = {}
-    for citation_doc_info in citation_docs_info:
-        if citation_doc_info.citation_number is not None:
-            search_doc_id = citation_number_to_search_doc_id.get(
-                citation_doc_info.citation_number
-            )
-            if search_doc_id is not None:
-                citations[citation_doc_info.citation_number] = search_doc_id
-            else:
-                logger.warning(
-                    f"Citation number {citation_doc_info.citation_number} found in citation_docs_info "
-                    f"but no matching search doc ID in mapping"
-                )
+    # 7. Build citations mapping - use the mapping we already built in step 4
+    assistant_message.citations = (
+        citation_number_to_search_doc_id if citation_number_to_search_doc_id else None
+    )
 
-    assistant_message.citations = citations if citations else None
+    # 8. Attach code interpreter generated files that the assistant actually
+    # referenced in its response, so they are available via load_all_chat_files
+    # on subsequent turns. Files not mentioned are intermediate artifacts.
+    if sanitized_message_text:
+        referenced = _extract_referenced_file_descriptors(
+            tool_calls, sanitized_message_text
+        )
+        if referenced:
+            existing_files = assistant_message.files or []
+            assistant_message.files = existing_files + referenced
 
     # Finally save the messages, tool calls, and docs
     db_session.commit()

@@ -11,7 +11,6 @@ from onyx.chat.emitter import Emitter
 from onyx.server.query_and_chat.placement import Placement
 from onyx.tools.models import ToolResponse
 
-
 TOverride = TypeVar("TOverride")
 
 
@@ -52,7 +51,7 @@ class Tool(abc.ABC, Generic[TOverride]):
         raise NotImplementedError
 
     @classmethod
-    def is_available(cls, db_session: "Session") -> bool:
+    def is_available(cls, db_session: "Session") -> bool:  # noqa: ARG003
         """
         Whether this tool is currently available for use given
         the state of the system. Default: available.
@@ -92,3 +91,7 @@ class Tool(abc.ABC, Generic[TOverride]):
         **llm_kwargs: Any,
     ) -> ToolResponse:
         raise NotImplementedError
+
+    @classmethod
+    def should_emit_argument_deltas(cls) -> bool:
+        return False

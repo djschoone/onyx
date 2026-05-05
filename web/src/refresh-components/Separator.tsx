@@ -2,11 +2,15 @@
 
 import React from "react";
 import * as SeparatorPrimitive from "@radix-ui/react-separator";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 
 export interface SeparatorProps
   extends React.ComponentPropsWithoutRef<typeof SeparatorPrimitive.Root> {
   noPadding?: boolean;
+  /** Custom horizontal padding in rem. Overrides the default padding. */
+  paddingXRem?: number;
+  /** Custom vertical padding in rem. Overrides the default padding. */
+  paddingYRem?: number;
 }
 
 /**
@@ -17,10 +21,10 @@ export interface SeparatorProps
  *
  * @example
  * ```tsx
- * // Horizontal separator (default)
+ * // Horizontal divider (default)
  * <Separator />
  *
- * // Vertical separator
+ * // Vertical divider
  * <Separator orientation="vertical" />
  *
  * // With custom className
@@ -34,7 +38,8 @@ const Separator = React.forwardRef(
   (
     {
       noPadding,
-
+      paddingXRem,
+      paddingYRem,
       className,
       orientation = "horizontal",
       decorative = true,
@@ -46,8 +51,23 @@ const Separator = React.forwardRef(
 
     return (
       <div
+        style={{
+          ...(paddingXRem != null
+            ? {
+                paddingLeft: `${paddingXRem}rem`,
+                paddingRight: `${paddingXRem}rem`,
+              }
+            : {}),
+          ...(paddingYRem != null
+            ? {
+                paddingTop: `${paddingYRem}rem`,
+                paddingBottom: `${paddingYRem}rem`,
+              }
+            : {}),
+        }}
         className={cn(
-          !noPadding && (isHorizontal ? "py-4" : "px-4"),
+          isHorizontal ? "w-full" : "h-full",
+          paddingXRem == null && !noPadding && (isHorizontal ? "py-4" : "px-4"),
           className
         )}
       >

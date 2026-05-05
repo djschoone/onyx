@@ -19,6 +19,7 @@ from onyx.db.models import Tool
 from onyx.db.models import User
 from onyx.server.features.mcp.models import MCPConnectionData
 from onyx.utils.logger import setup_logger
+from onyx.utils.sensitive import SensitiveValue
 
 logger = setup_logger()
 
@@ -49,7 +50,9 @@ def get_mcp_servers_by_owner(owner_email: str, db_session: Session) -> list[MCPS
 
 
 def get_mcp_servers_for_persona(
-    persona_id: int, db_session: Session, user: User | None = None
+    persona_id: int,
+    db_session: Session,
+    user: User,  # noqa: ARG001
 ) -> list[MCPServer]:
     """Get all MCP servers associated with a persona via its tools"""
     # Get the persona and its tools
@@ -78,7 +81,9 @@ def get_mcp_servers_accessible_to_user(
     user_id: UUID, db_session: Session
 ) -> list[MCPServer]:
     """Get all MCP servers accessible to a user (directly or through groups)"""
-    user = db_session.scalar(select(User).where(User.id == user_id))  # type: ignore
+    user = db_session.scalar(
+        select(User).where(User.id == user_id)  # ty: ignore[invalid-argument-type]
+    )
     if not user:
         return []
     user = cast(User, user)
@@ -180,7 +185,9 @@ def get_all_mcp_tools_for_server(server_id: int, db_session: Session) -> list[To
 def add_user_to_mcp_server(server_id: int, user_id: UUID, db_session: Session) -> None:
     """Grant a user access to an MCP server"""
     server = get_mcp_server_by_id(server_id, db_session)
-    user = db_session.scalar(select(User).where(User.id == user_id))  # type: ignore
+    user = db_session.scalar(
+        select(User).where(User.id == user_id)  # ty: ignore[invalid-argument-type]
+    )
     if not user:
         raise ValueError("User not found")
 
@@ -194,7 +201,9 @@ def remove_user_from_mcp_server(
 ) -> None:
     """Remove a user's access to an MCP server"""
     server = get_mcp_server_by_id(server_id, db_session)
-    user = db_session.scalar(select(User).where(User.id == user_id))  # type: ignore
+    user = db_session.scalar(
+        select(User).where(User.id == user_id)  # ty: ignore[invalid-argument-type]
+    )
     if not user:
         raise ValueError("User not found")
 
@@ -204,6 +213,21 @@ def remove_user_from_mcp_server(
 
 
 # MCPConnectionConfig operations
+def extract_connection_data(
+    config: MCPConnectionConfig | None, apply_mask: bool = False
+) -> MCPConnectionData:
+    """Extract MCPConnectionData from a connection config, with proper typing.
+
+    This helper encapsulates the cast from the JSON column's dict[str, Any]
+    to the typed MCPConnectionData structure.
+    """
+    if config is None or config.config is None:
+        return MCPConnectionData(headers={})
+    if isinstance(config.config, SensitiveValue):
+        return cast(MCPConnectionData, config.config.get_value(apply_mask=apply_mask))
+    return cast(MCPConnectionData, config.config)
+
+
 def get_connection_config_by_id(
     config_id: int, db_session: Session
 ) -> MCPConnectionConfig:
@@ -269,7 +293,7 @@ def update_connection_config(
     config = get_connection_config_by_id(config_id, db_session)
 
     if config_data is not None:
-        config.config = config_data
+        config.config = config_data  # ty: ignore[invalid-assignment]
         # Force SQLAlchemy to detect the change by marking the field as modified
         flag_modified(config, "config")
 
@@ -287,7 +311,7 @@ def upsert_user_connection_config(
     existing_config = get_user_connection_config(server_id, user_email, db_session)
 
     if existing_config:
-        existing_config.config = config_data
+        existing_config.config = config_data  # ty: ignore[invalid-assignment]
         db_session.flush()  # Don't commit yet, let caller decide when to commit
         return existing_config
     else:

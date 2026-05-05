@@ -6,10 +6,12 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from onyx.auth.permissions import require_permission
 from onyx.auth.schemas import UserRole
 from onyx.auth.users import current_curator_or_admin_user
-from onyx.auth.users import current_user
+from onyx.configs.constants import PUBLIC_API_TAGS
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import Permission
 from onyx.db.models import Tool
 from onyx.db.models import User
 from onyx.db.tools import create_tool__no_commit
@@ -52,9 +54,7 @@ def _validate_auth_settings(tool_data: CustomToolCreate | CustomToolUpdate) -> N
                 )
 
 
-def _get_editable_custom_tool(
-    tool_id: int, db_session: Session, user: User | None
-) -> Tool:
+def _get_editable_custom_tool(tool_id: int, db_session: Session, user: User) -> Tool:
     """Fetch a custom tool and ensure the caller has permission to edit it."""
     try:
         tool = get_tool_by_id(tool_id, db_session)
@@ -68,7 +68,7 @@ def _get_editable_custom_tool(
         )
 
     # Admins can always make changes; non-admins must own the tool.
-    if not user or user.role == UserRole.ADMIN:
+    if user.role == UserRole.ADMIN:
         return tool
 
     if tool.user_id is None or tool.user_id != user.id:
@@ -80,11 +80,11 @@ def _get_editable_custom_tool(
     return tool
 
 
-@admin_router.post("/custom")
+@admin_router.post("/custom", tags=PUBLIC_API_TAGS)
 def create_custom_tool(
     tool_data: CustomToolCreate,
     db_session: Session = Depends(get_session),
-    user: User | None = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),
 ) -> ToolSnapshot:
     _validate_tool_definition(tool_data.definition)
     _validate_auth_settings(tool_data)
@@ -93,7 +93,7 @@ def create_custom_tool(
         description=tool_data.description,
         openapi_schema=tool_data.definition,
         custom_headers=tool_data.custom_headers,
-        user_id=user.id if user else None,
+        user_id=user.id,
         db_session=db_session,
         passthrough_auth=tool_data.passthrough_auth,
         oauth_config_id=tool_data.oauth_config_id,
@@ -103,12 +103,12 @@ def create_custom_tool(
     return ToolSnapshot.from_model(tool)
 
 
-@admin_router.put("/custom/{tool_id}")
+@admin_router.put("/custom/{tool_id}", tags=PUBLIC_API_TAGS)
 def update_custom_tool(
     tool_id: int,
     tool_data: CustomToolUpdate,
     db_session: Session = Depends(get_session),
-    user: User | None = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),
 ) -> ToolSnapshot:
     existing_tool = _get_editable_custom_tool(tool_id, db_session, user)
     if tool_data.definition:
@@ -128,11 +128,11 @@ def update_custom_tool(
     return ToolSnapshot.from_model(updated_tool)
 
 
-@admin_router.delete("/custom/{tool_id}")
+@admin_router.delete("/custom/{tool_id}", tags=PUBLIC_API_TAGS)
 def delete_custom_tool(
     tool_id: int,
     db_session: Session = Depends(get_session),
-    user: User | None = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),
 ) -> None:
     _ = _get_editable_custom_tool(tool_id, db_session, user)
     try:
@@ -159,7 +159,7 @@ class ToolStatusUpdateResponse(BaseModel):
 def update_tools_status(
     update_data: ToolStatusUpdateRequest,
     db_session: Session = Depends(get_session),
-    user: User | None = Depends(current_curator_or_admin_user),
+    user: User = Depends(current_curator_or_admin_user),  # noqa: ARG001
 ) -> ToolStatusUpdateResponse:
     """Enable or disable one or more tools.
 
@@ -204,10 +204,10 @@ class ValidateToolResponse(BaseModel):
     methods: list[MethodSpec]
 
 
-@admin_router.post("/custom/validate")
+@admin_router.post("/custom/validate", tags=PUBLIC_API_TAGS)
 def validate_tool(
     tool_data: ValidateToolRequest,
-    _: User | None = Depends(current_curator_or_admin_user),
+    _: User = Depends(current_curator_or_admin_user),
 ) -> ValidateToolResponse:
     _validate_tool_definition(tool_data.definition)
     method_specs = openapi_to_method_specs(tool_data.definition)
@@ -217,10 +217,10 @@ def validate_tool(
 """Endpoints for all"""
 
 
-@router.get("/openapi")
+@router.get("/openapi", tags=PUBLIC_API_TAGS)
 def list_openapi_tools(
     db_session: Session = Depends(get_session),
-    _: User | None = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> list[ToolSnapshot]:
     tools = get_tools(db_session, only_openapi=True)
 
@@ -234,11 +234,11 @@ def list_openapi_tools(
     return openapi_tools
 
 
-@router.get("/{tool_id}")
+@router.get("/{tool_id}", tags=PUBLIC_API_TAGS)
 def get_custom_tool(
     tool_id: int,
     db_session: Session = Depends(get_session),
-    _: User | None = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> ToolSnapshot:
     try:
         tool = get_tool_by_id(tool_id, db_session)
@@ -247,10 +247,10 @@ def get_custom_tool(
     return ToolSnapshot.from_model(tool)
 
 
-@router.get("")
+@router.get("", tags=PUBLIC_API_TAGS)
 def list_tools(
     db_session: Session = Depends(get_session),
-    _: User | None = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> list[ToolSnapshot]:
     tools = get_tools(db_session, only_enabled=True, only_connected_mcp=True)
 

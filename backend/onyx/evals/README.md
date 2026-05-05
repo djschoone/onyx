@@ -22,8 +22,8 @@ You can also run the CLI directly from the command line:
 ```bash
 onyx$ python -m dotenv -f .vscode/.env run -- python backend/onyx/evals/eval_cli.py --local-dataset-path backend/onyx/evals/data/eval.json --search-permissions-email richard@onyx.app
 ```
-make sure your AUTH_TYPE=disabled when running evals locally. Save the env var ONYX_EVAL_API_KEY in your .env file so you don't 
-have to specify it every time for triggering remote runs. 
+Save the env var ONYX_EVAL_API_KEY in your .env file so you don't have to specify it every time for triggering remote runs.
+You'll need to create an API key in the admin panel to run evals.
 
 
 ### Production Environment
@@ -111,6 +111,42 @@ Example with tool and model configuration:
   }
 ]
 ```
+
+### Multi-Turn Evaluations
+
+For testing realistic multi-turn conversations where each turn may require different tools, use the `messages` array format instead of a single `message`:
+
+```json
+{
+  "input": {
+    "messages": [
+      {
+        "message": "What's the latest news about OpenAI today?",
+        "expected_tools": ["WebSearchTool", "OpenURLTool"]
+      },
+      {
+        "message": "Now search our internal docs for our OpenAI integration guide",
+        "expected_tools": ["SearchTool"]
+      },
+      {
+        "message": "Thanks, that's helpful!",
+        "expected_tools": []
+      }
+    ]
+  }
+}
+```
+
+Each message in the `messages` array can have its own configuration:
+- `message`: The user message text (required)
+- `expected_tools`: List of tool types expected to be called for this turn
+- `require_all_tools`: If true, all expected tools must be called (default: false)
+- `force_tools`: List of tool types to force for this turn
+- `model`: Model version override for this turn
+- `model_provider`: Model provider override for this turn
+- `temperature`: Temperature override for this turn
+
+Multi-turn evals run within a single chat session, so the model has full context of previous turns when responding.
 
 ### Available Tool Types
 

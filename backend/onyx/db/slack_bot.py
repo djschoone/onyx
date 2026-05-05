@@ -43,9 +43,9 @@ def update_slack_bot(
     # update the app
     slack_bot.name = name
     slack_bot.enabled = enabled
-    slack_bot.bot_token = bot_token
-    slack_bot.app_token = app_token
-    slack_bot.user_token = user_token
+    slack_bot.bot_token = bot_token  # ty: ignore[invalid-assignment]
+    slack_bot.app_token = app_token  # ty: ignore[invalid-assignment]
+    slack_bot.user_token = user_token  # ty: ignore[invalid-assignment]
 
     db_session.commit()
 

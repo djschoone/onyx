@@ -7,39 +7,86 @@ from typing import TypeVar
 from retry import retry
 from slack_sdk import WebClient
 
-from onyx.chat.chat_utils import prepare_chat_message_request
+from onyx.auth.users import get_anonymous_user
 from onyx.chat.models import ChatBasicResponse
-from onyx.chat.models import ThreadMessage
 from onyx.chat.process_message import gather_stream
-from onyx.chat.process_message import stream_chat_message_objects
+from onyx.chat.process_message import handle_stream_message_objects
 from onyx.configs.constants import DEFAULT_PERSONA_ID
 from onyx.configs.constants import MessageType
-from onyx.configs.onyxbot_configs import MAX_THREAD_CONTEXT_PERCENTAGE
 from onyx.configs.onyxbot_configs import ONYX_BOT_DISABLE_DOCS_ONLY_ANSWER
 from onyx.configs.onyxbot_configs import ONYX_BOT_DISPLAY_ERROR_MSGS
 from onyx.configs.onyxbot_configs import ONYX_BOT_NUM_RETRIES
 from onyx.configs.onyxbot_configs import ONYX_BOT_REACT_EMOJI
-from onyx.context.search.enums import OptionalSearchSetting
 from onyx.context.search.models import BaseFilters
-from onyx.context.search.models import RetrievalDetails
+from onyx.context.search.models import Tag
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.models import SlackChannelConfig
 from onyx.db.models import User
 from onyx.db.persona import get_persona_by_id
 from onyx.db.users import get_user_by_email
 from onyx.onyxbot.slack.blocks import build_slack_response_blocks
+from onyx.onyxbot.slack.constants import SLACK_CHANNEL_REF_PATTERN
 from onyx.onyxbot.slack.handlers.utils import send_team_member_message
 from onyx.onyxbot.slack.models import SlackMessageInfo
+from onyx.onyxbot.slack.models import ThreadMessage
+from onyx.onyxbot.slack.utils import get_channel_from_id
 from onyx.onyxbot.slack.utils import get_channel_name_from_id
 from onyx.onyxbot.slack.utils import respond_in_thread_or_channel
 from onyx.onyxbot.slack.utils import SlackRateLimiter
 from onyx.onyxbot.slack.utils import update_emote_react
-from onyx.server.query_and_chat.models import CreateChatMessageRequest
+from onyx.server.query_and_chat.models import ChatSessionCreationRequest
+from onyx.server.query_and_chat.models import MessageOrigin
+from onyx.server.query_and_chat.models import SendMessageRequest
 from onyx.utils.logger import OnyxLoggingAdapter
 
 srl = SlackRateLimiter()
 
 RT = TypeVar("RT")  # return type
+
+
+def resolve_channel_references(
+    message: str,
+    client: WebClient,
+    logger: OnyxLoggingAdapter,
+) -> tuple[str, list[Tag]]:
+    """Parse Slack channel references from a message, resolve IDs to names,
+    replace the raw markup with readable #channel-name, and return channel tags
+    for search filtering."""
+    tags: list[Tag] = []
+    channel_matches = SLACK_CHANNEL_REF_PATTERN.findall(message)
+    seen_channel_ids: set[str] = set()
+
+    for channel_id, channel_name_from_markup in channel_matches:
+        if channel_id in seen_channel_ids:
+            continue
+        seen_channel_ids.add(channel_id)
+
+        channel_name = channel_name_from_markup or None
+
+        if not channel_name:
+            try:
+                channel_info = get_channel_from_id(client=client, channel_id=channel_id)
+                channel_name = channel_info.get("name") or None
+            except Exception:
+                logger.warning(f"Failed to resolve channel name for ID: {channel_id}")
+
+            if not channel_name:
+                continue
+
+        # Replace raw Slack markup with readable channel name
+        if channel_name_from_markup:
+            message = message.replace(
+                f"<#{channel_id}|{channel_name_from_markup}>",
+                f"#{channel_name}",
+            )
+        else:
+            message = message.replace(
+                f"<#{channel_id}>",
+                f"#{channel_name}",
+            )
+        tags.append(Tag(tag_key="Channel", tag_value=channel_name))
+
+    return message, tags
 
 
 def rate_limits(
@@ -96,7 +143,6 @@ def handle_regular_answer(
     logger: OnyxLoggingAdapter,
     feedback_reminder_id: str | None,
     num_retries: int = ONYX_BOT_NUM_RETRIES,
-    thread_context_percent: float = MAX_THREAD_CONTEXT_PERCENTAGE,
     should_respond_with_error_msgs: bool = ONYX_BOT_DISPLAY_ERROR_MSGS,
     disable_docs_only_answer: bool = ONYX_BOT_DISABLE_DOCS_ONLY_ANSWER,
 ) -> bool:
@@ -115,16 +161,18 @@ def handle_regular_answer(
         or message_info.is_slash_command
     ) and not message_info.is_bot_dm
 
-    # If the channel mis configured to respond with an ephemeral message,
+    # If the channel is configured to respond with an ephemeral message,
     # or the message is a dm to the Onyx bot, we should use the proper onyx user from the email.
     # This will make documents privately accessible to the user available to Onyx Bot answers.
-    # Otherwise - if not ephemeral or DM to Onyx Bot - we must use None as the user to restrict
+    # Otherwise - if not ephemeral or DM to Onyx Bot - we use anonymous user to restrict
     # to public docs.
 
-    user = None
     if message_info.email:
         with get_session_with_current_tenant() as db_session:
-            user = get_user_by_email(message_info.email, db_session)
+            found_user = get_user_by_email(message_info.email, db_session)
+            user = found_user if found_user else get_anonymous_user()
+    else:
+        user = get_anonymous_user()
 
     target_thread_ts = (
         None
@@ -157,6 +205,20 @@ def handle_regular_answer(
     user_message = messages[-1]
     history_messages = messages[:-1]
 
+    # Resolve any <#CHANNEL_ID> references in the user message to readable
+    # channel names and extract channel tags for search filtering
+    resolved_message, channel_tags = resolve_channel_references(
+        message=user_message.message,
+        client=client,
+        logger=logger,
+    )
+
+    user_message = ThreadMessage(
+        message=resolved_message,
+        sender=user_message.sender,
+        role=user_message.role,
+    )
+
     channel_name, _ = get_channel_name_from_id(
         client=client,
         channel_id=channel,
@@ -180,13 +242,12 @@ def handle_regular_answer(
     )
     @rate_limits(client=client, channel=channel, thread_ts=message_ts_to_respond_to)
     def _get_slack_answer(
-        new_message_request: CreateChatMessageRequest,
+        new_message_request: SendMessageRequest,
         slack_context_str: str | None,
-        # pass in `None` to make the answer based on public documents only
-        onyx_user: User | None,
+        onyx_user: User,
     ) -> ChatBasicResponse:
         with get_session_with_current_tenant() as db_session:
-            packets = stream_chat_message_objects(
+            packets = handle_stream_message_objects(
                 new_msg_req=new_message_request,
                 user=onyx_user,
                 db_session=db_session,
@@ -208,49 +269,44 @@ def handle_regular_answer(
             source_type=None,
             document_set=document_set_names,
             time_cutoff=None,
+            tags=channel_tags if channel_tags else None,
         )
 
-        # Default True because no other ways to apply filters in Slack (no nice UI)
-        # Commenting this out because this is only available to the slackbot for now
-        # later we plan to implement this at the persona level where this will get
-        # commented back in
-        # auto_detect_filters = (
-        #     persona.llm_filter_extraction if persona is not None else True
-        # )
-        auto_detect_filters = slack_channel_config.enable_auto_filters
-        retrieval_details = RetrievalDetails(
-            run_search=OptionalSearchSetting.ALWAYS,
-            real_time=False,
-            filters=filters,
-            enable_auto_detect_filters=auto_detect_filters,
-        )
-
-        with get_session_with_current_tenant() as db_session:
-            answer_request = prepare_chat_message_request(
-                message_text=user_message.message,
-                user=user,
+        new_message_request = SendMessageRequest(
+            message=user_message.message,
+            allowed_tool_ids=None,
+            forced_tool_id=None,
+            file_descriptors=[],
+            internal_search_filters=filters,
+            deep_research=False,
+            origin=MessageOrigin.SLACKBOT,
+            chat_session_info=ChatSessionCreationRequest(
                 persona_id=persona.id,
-                # This is not used in the Slack flow, only in the answer API
-                persona_override_config=None,
-                message_ts_to_respond_to=message_ts_to_respond_to,
-                retrieval_details=retrieval_details,
-                rerank_settings=None,  # Rerank customization supported in Slack flow
-                db_session=db_session,
-            )
+            ),
+        )
 
         # if it's a DM or ephemeral message, answer based on private documents.
         # otherwise, answer based on public documents ONLY as to not leak information.
         can_search_over_private_docs = message_info.is_bot_dm or send_as_ephemeral
         answer = _get_slack_answer(
-            new_message_request=answer_request,
-            onyx_user=user if can_search_over_private_docs else None,
+            new_message_request=new_message_request,
+            onyx_user=user if can_search_over_private_docs else get_anonymous_user(),
             slack_context_str=slack_context_str,
         )
 
+        # If a channel filter was applied but no results were found, override
+        # the LLM response to avoid hallucinated answers about unindexed channels
+        if channel_tags and not answer.citation_info and not answer.top_documents:
+            channel_names = ", ".join(f"#{tag.tag_value}" for tag in channel_tags)
+            answer.answer = (
+                f"No indexed data found for {channel_names}. "
+                "This channel may not be indexed, or there may be no messages "
+                "matching your query within it."
+            )
+
     except Exception as e:
         logger.exception(
-            f"Unable to process message - did not successfully answer "
-            f"in {num_retries} attempts"
+            f"Unable to process message - did not successfully answer in {num_retries} attempts"
         )
         # Optionally, respond in thread with the error message, Used primarily
         # for debugging purposes
@@ -287,8 +343,7 @@ def handle_regular_answer(
 
     if not answer.answer and disable_docs_only_answer:
         logger.notice(
-            "Unable to find answer - not responding since the "
-            "`ONYX_BOT_DISABLE_DOCS_ONLY_ANSWER` env variable is set"
+            "Unable to find answer - not responding since the `ONYX_BOT_DISABLE_DOCS_ONLY_ANSWER` env variable is set"
         )
         return True
 
@@ -301,6 +356,7 @@ def handle_regular_answer(
         only_respond_if_citations
         and not answer.citation_info
         and not message_info.bypass_filters
+        and not channel_tags
     ):
         logger.error(
             f"Unable to find citations to answer: '{answer.answer}' - not answering!"

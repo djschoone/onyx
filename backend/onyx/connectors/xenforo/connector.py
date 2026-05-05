@@ -18,7 +18,6 @@ from datetime import timezone
 from typing import Any
 from urllib.parse import urlparse
 
-import pytz
 import requests
 from bs4 import BeautifulSoup
 from bs4 import Tag
@@ -29,6 +28,7 @@ from onyx.connectors.interfaces import GenerateDocumentsOutput
 from onyx.connectors.interfaces import LoadConnector
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.utils.logger import setup_logger
 
@@ -63,7 +63,7 @@ def get_pages(soup: BeautifulSoup, url: str) -> list[str]:
 def parse_post_date(post_element: BeautifulSoup) -> datetime:
     el = post_element.find("time")
     if not isinstance(el, Tag) or "datetime" not in el.attrs:
-        return datetime.utcfromtimestamp(0).replace(tzinfo=timezone.utc)
+        return datetime.fromtimestamp(0, tz=timezone.utc)
 
     date_value = el["datetime"]
 
@@ -129,7 +129,7 @@ class XenforoConnector(LoadConnector):
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
         self.initial_run = not XenforoConnector.has_been_run_before
-        self.start = datetime.utcnow().replace(tzinfo=pytz.utc) - timedelta(days=1)
+        self.start = datetime.now(tz=timezone.utc) - timedelta(days=1)
         self.cookies: dict[str, str] = {}
         # mimic user browser to avoid being blocked by the website (see: https://www.useragents.me/)
         self.headers = {
@@ -162,7 +162,7 @@ class XenforoConnector(LoadConnector):
                 except ValueError:
                     pass
 
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
         all_threads = []
 
         # If the URL contains "boards/" or "forums/", find all threads.

@@ -3,6 +3,7 @@
 from onyx.server.manage.llm.utils import generate_bedrock_display_name
 from onyx.server.manage.llm.utils import generate_ollama_display_name
 from onyx.server.manage.llm.utils import infer_vision_support
+from onyx.server.manage.llm.utils import is_embedding_model
 from onyx.server.manage.llm.utils import is_reasoning_model
 from onyx.server.manage.llm.utils import is_valid_bedrock_model
 from onyx.server.manage.llm.utils import strip_openrouter_vendor_prefix
@@ -99,6 +100,39 @@ class TestGenerateOllamaDisplayName:
         result = generate_ollama_display_name("llama3.3:70b")
         assert "3.3" in result or "3 3" in result  # Either format is acceptable
 
+    def test_non_size_tag_shown(self) -> None:
+        """Test that non-size tags like 'e4b' are included in the display name."""
+        result = generate_ollama_display_name("gemma4:e4b")
+        assert "Gemma" in result
+        assert "4" in result
+        assert "E4B" in result
+
+    def test_size_with_cloud_modifier(self) -> None:
+        """Test size tag with cloud modifier."""
+        result = generate_ollama_display_name("deepseek-v3.1:671b-cloud")
+        assert "DeepSeek" in result
+        assert "671B" in result
+        assert "Cloud" in result
+
+    def test_size_with_multiple_modifiers(self) -> None:
+        """Test size tag with multiple modifiers."""
+        result = generate_ollama_display_name("qwen3-vl:235b-instruct-cloud")
+        assert "Qwen" in result
+        assert "235B" in result
+        assert "Instruct" in result
+        assert "Cloud" in result
+
+    def test_quantization_tag_shown(self) -> None:
+        """Test that quantization tags are included in the display name."""
+        result = generate_ollama_display_name("llama3:q4_0")
+        assert "Llama" in result
+        assert "Q4_0" in result
+
+    def test_cloud_only_tag(self) -> None:
+        """Test standalone cloud tag."""
+        result = generate_ollama_display_name("glm-4.6:cloud")
+        assert "CLOUD" in result
+
 
 class TestStripOpenrouterVendorPrefix:
     """Tests for OpenRouter vendor prefix stripping."""
@@ -175,6 +209,14 @@ class TestInferVisionSupport:
         """Test Nova Pro has vision."""
         assert infer_vision_support("amazon.nova-pro-v1") is True
 
+    def test_bifrost_claude_has_vision(self) -> None:
+        """Test Bifrost Claude models are recognized as vision-capable."""
+        assert infer_vision_support("anthropic/claude-3-5-sonnet") is True
+
+    def test_bifrost_gpt4o_has_vision(self) -> None:
+        """Test Bifrost GPT-4o models are recognized as vision-capable."""
+        assert infer_vision_support("openai/gpt-4o") is True
+
     def test_mistral_no_vision(self) -> None:
         """Test Mistral doesn't have vision (not in known list)."""
         assert infer_vision_support("mistral.mistral-large") is False
@@ -209,3 +251,35 @@ class TestIsReasoningModel:
             is_reasoning_model("anthropic/claude-3-5-sonnet", "Claude 3.5 Sonnet")
             is False
         )
+
+
+class TestIsEmbeddingModel:
+    """Tests for embedding model detection."""
+
+    def test_openai_embedding_ada(self) -> None:
+        assert is_embedding_model("text-embedding-ada-002") is True
+
+    def test_openai_embedding_3_small(self) -> None:
+        assert is_embedding_model("text-embedding-3-small") is True
+
+    def test_openai_embedding_3_large(self) -> None:
+        assert is_embedding_model("text-embedding-3-large") is True
+
+    def test_cohere_embed_model(self) -> None:
+        assert is_embedding_model("embed-english-v3.0") is True
+
+    def test_bedrock_titan_embed(self) -> None:
+        assert is_embedding_model("amazon.titan-embed-text-v1") is True
+
+    def test_gpt4o_not_embedding(self) -> None:
+        assert is_embedding_model("gpt-4o") is False
+
+    def test_gpt4_not_embedding(self) -> None:
+        assert is_embedding_model("gpt-4") is False
+
+    def test_dall_e_not_embedding(self) -> None:
+        assert is_embedding_model("dall-e-3") is False
+
+    def test_unknown_custom_model_not_embedding(self) -> None:
+        """Custom/local models not in litellm's model DB should default to False."""
+        assert is_embedding_model("my-custom-local-model-v1") is False

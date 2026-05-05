@@ -23,43 +23,71 @@ from onyx.utils.timing import log_function_time
 logger = setup_logger()
 
 
-def user_file_id_to_plaintext_file_name(user_file_id: UUID) -> str:
-    """Generate a consistent file name for storing plaintext content of a user file."""
-    return f"plaintext_{user_file_id}"
+def plaintext_file_name_for_id(file_id: str) -> str:
+    """Generate a consistent file name for storing plaintext content of a file."""
+    return f"plaintext_{file_id}"
 
 
-def store_user_file_plaintext(user_file_id: UUID, plaintext_content: str) -> bool:
+def store_plaintext(file_id: str, plaintext_content: str) -> bool:
     """
-    Store plaintext content for a user file in the file store.
+    Store plaintext content for a file in the file store.
 
     Args:
-        user_file_id: The ID of the user file
+        file_id: The ID of the file (user_file or artifact_file)
         plaintext_content: The plaintext content to store
 
     Returns:
         bool: True if storage was successful, False otherwise
     """
-    # Skip empty content
     if not plaintext_content:
         return False
 
-    # Get plaintext file name
-    plaintext_file_name = user_file_id_to_plaintext_file_name(user_file_id)
-
+    plaintext_file_name = plaintext_file_name_for_id(file_id)
     try:
         file_store = get_default_file_store()
         file_content = BytesIO(plaintext_content.encode("utf-8"))
         file_store.save_file(
             content=file_content,
-            display_name=f"Plaintext for user file {user_file_id}",
+            display_name=f"Plaintext for {file_id}",
             file_origin=FileOrigin.PLAINTEXT_CACHE,
             file_type="text/plain",
             file_id=plaintext_file_name,
         )
         return True
     except Exception as e:
-        logger.warning(f"Failed to store plaintext for user file {user_file_id}: {e}")
+        logger.warning(f"Failed to store plaintext for {file_id}: {e}")
         return False
+
+
+# --- Convenience wrappers for callers that use user-file UUIDs ---
+
+
+def user_file_id_to_plaintext_file_name(user_file_id: UUID) -> str:
+    """Generate a consistent file name for storing plaintext content of a user file."""
+    return plaintext_file_name_for_id(str(user_file_id))
+
+
+def store_user_file_plaintext(user_file_id: UUID, plaintext_content: str) -> bool:
+    """Store plaintext content for a user file (delegates to :func:`store_plaintext`)."""
+    return store_plaintext(str(user_file_id), plaintext_content)
+
+
+def load_chat_file_by_id(file_id: str) -> InMemoryChatFile:
+    """Load a file directly from the file store using its file_record ID.
+
+    This is the fallback path for chat-attached files that don't have a
+    corresponding row in the ``user_file`` table."""
+    file_store = get_default_file_store()
+    file_record = file_store.read_file_record(file_id)
+    chat_file_type = mime_type_to_chat_file_type(file_record.file_type)
+
+    file_io = file_store.read_file(file_id, mode="b")
+    return InMemoryChatFile(
+        file_id=file_id,
+        content=file_io.read(),
+        file_type=chat_file_type,
+        filename=file_record.display_name,
+    )
 
 
 def load_user_file(file_id: UUID, db_session: Session) -> InMemoryChatFile:
@@ -82,16 +110,20 @@ def load_user_file(file_id: UUID, db_session: Session) -> InMemoryChatFile:
     # check for plain text normalized version first, then use original file otherwise
     try:
         file_io = file_store.read_file(plaintext_file_name, mode="b")
-        # For plaintext versions, use PLAIN_TEXT type (unless it's an image which doesn't have plaintext)
-        plaintext_chat_file_type = (
-            ChatFileType.PLAIN_TEXT
-            if chat_file_type != ChatFileType.IMAGE
-            else chat_file_type
-        )
-
-        # if we have plaintext for image (which happens when image extraction is enabled), we use PLAIN_TEXT type
-        if file_io is not None:
+        # Metadata-only file types preserve their original type so
+        # downstream injection paths can route them correctly.
+        if chat_file_type.use_metadata_only():
+            plaintext_chat_file_type = chat_file_type
+        elif file_io is not None:
+            # if we have plaintext for image (which happens when image
+            # extraction is enabled), we use PLAIN_TEXT type
             plaintext_chat_file_type = ChatFileType.PLAIN_TEXT
+        else:
+            plaintext_chat_file_type = (
+                ChatFileType.PLAIN_TEXT
+                if chat_file_type != ChatFileType.IMAGE
+                else chat_file_type
+            )
 
         chat_file = InMemoryChatFile(
             file_id=str(user_file.file_id),
@@ -116,9 +148,7 @@ def load_user_file(file_id: UUID, db_session: Session) -> InMemoryChatFile:
         return chat_file
     finally:
         logger.debug(
-            f"load_user_file finished: file_id={user_file.file_id} "
-            f"chat_file_type={chat_file_type} "
-            f"status={status}"
+            f"load_user_file finished: file_id={user_file.file_id} chat_file_type={chat_file_type} status={status}"
         )
 
 

@@ -6,13 +6,20 @@ from typing import cast
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
-from googleapiclient.errors import HttpError  # type: ignore
-from googleapiclient.http import MediaIoBaseDownload  # type: ignore
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
 from pydantic import BaseModel
 
 from onyx.access.models import ExternalAccess
 from onyx.configs.constants import DocumentSource
 from onyx.configs.constants import FileOrigin
+from onyx.connectors.cross_connector_utils.tabular_section_utils import (
+    extract_and_stage_tabular_file,
+)
+from onyx.connectors.cross_connector_utils.tabular_section_utils import is_tabular_file
+from onyx.connectors.cross_connector_utils.tabular_section_utils import (
+    tabular_file_to_sections,
+)
 from onyx.connectors.google_drive.constants import DRIVE_FOLDER_TYPE
 from onyx.connectors.google_drive.constants import DRIVE_SHORTCUT_TYPE
 from onyx.connectors.google_drive.models import GDriveMimeType
@@ -28,16 +35,18 @@ from onyx.connectors.models import Document
 from onyx.connectors.models import DocumentFailure
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import SlimDocument
+from onyx.connectors.models import TabularSection
 from onyx.connectors.models import TextSection
 from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.file_processing.extract_file_text import get_file_ext
 from onyx.file_processing.extract_file_text import pptx_to_text
 from onyx.file_processing.extract_file_text import read_docx_file
 from onyx.file_processing.extract_file_text import read_pdf_file
-from onyx.file_processing.extract_file_text import xlsx_to_text
 from onyx.file_processing.file_types import OnyxFileExtensions
 from onyx.file_processing.file_types import OnyxMimeTypes
+from onyx.file_processing.file_types import SPREADSHEET_MIME_TYPE
 from onyx.file_processing.image_utils import store_image_and_create_section
+from onyx.file_store.staging import RawFileCallback
 from onyx.utils.logger import setup_logger
 from onyx.utils.variable_functionality import (
     fetch_versioned_implementation_with_fallback,
@@ -45,6 +54,148 @@ from onyx.utils.variable_functionality import (
 from onyx.utils.variable_functionality import noop_fallback
 
 logger = setup_logger()
+
+
+class FileExtractionResult(BaseModel):
+    sections: list[TextSection | ImageSection | TabularSection]
+    staged_file_id: str | None = None
+
+
+# Cache for folder path lookups to avoid redundant API calls
+# Maps folder_id -> (folder_name, parent_id)
+_folder_cache: dict[str, tuple[str, str | None]] = {}
+
+
+def _get_folder_info(
+    service: GoogleDriveService, folder_id: str
+) -> tuple[str, str | None]:
+    """Fetch folder name and parent ID, with caching."""
+    if folder_id in _folder_cache:
+        return _folder_cache[folder_id]
+
+    try:
+        folder = (
+            service.files()  # ty: ignore[unresolved-attribute]
+            .get(
+                fileId=folder_id,
+                fields="name, parents",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        folder_name = folder.get("name", "Unknown")
+        parents = folder.get("parents", [])
+        parent_id = parents[0] if parents else None
+        _folder_cache[folder_id] = (folder_name, parent_id)
+        return folder_name, parent_id
+    except HttpError as e:
+        logger.warning(f"Failed to get folder info for {folder_id}: {e}")
+        _folder_cache[folder_id] = ("Unknown", None)
+        return "Unknown", None
+
+
+def _get_drive_name(service: GoogleDriveService, drive_id: str) -> str:
+    """Fetch shared drive name."""
+    cache_key = f"drive_{drive_id}"
+    if cache_key in _folder_cache:
+        return _folder_cache[cache_key][0]
+
+    try:
+        drive = (
+            service.drives()  # ty: ignore[unresolved-attribute]
+            .get(driveId=drive_id)
+            .execute()
+        )
+        drive_name = drive.get("name", f"Shared Drive {drive_id}")
+        _folder_cache[cache_key] = (drive_name, None)
+        return drive_name
+    except HttpError as e:
+        logger.warning(f"Failed to get drive name for {drive_id}: {e}")
+        _folder_cache[cache_key] = (f"Shared Drive {drive_id}", None)
+        return f"Shared Drive {drive_id}"
+
+
+def build_folder_path(
+    file: GoogleDriveFileType,
+    service: GoogleDriveService,
+    drive_id: str | None = None,
+    user_email: str | None = None,
+) -> list[str]:
+    """
+    Build the full folder path for a file by walking up the parent chain.
+    Returns a list of folder names from root to immediate parent.
+
+    Args:
+        file: The Google Drive file object
+        service: Google Drive service instance
+        drive_id: Optional drive ID (will be extracted from file if not provided)
+        user_email: Optional user email to check ownership for "My Drive" vs "Shared with me"
+    """
+    path_parts: list[str] = []
+
+    # Get drive_id from file if not provided
+    if drive_id is None:
+        drive_id = file.get("driveId")
+
+    # Check if file is owned by the user (for distinguishing "My Drive" vs "Shared with me")
+    is_owned_by_user = False
+    if user_email:
+        owners = file.get("owners", [])
+        is_owned_by_user = any(
+            owner.get("emailAddress", "").lower() == user_email.lower()
+            for owner in owners
+        )
+
+    # Get the file's parent folder ID
+    parents = file.get("parents", [])
+    if not parents:
+        # File is at root level
+        if drive_id:
+            return [_get_drive_name(service, drive_id)]
+        # If not in a shared drive, check if it's owned by the user
+        if is_owned_by_user:
+            return ["My Drive"]
+        else:
+            return ["Shared with me"]
+
+    parent_id: str | None = parents[0]
+
+    # Walk up the folder hierarchy (limit to 50 levels to prevent infinite loops)
+    visited: set[str] = set()
+    for _ in range(50):
+        if not parent_id or parent_id in visited:
+            break
+        visited.add(parent_id)
+
+        folder_name, next_parent = _get_folder_info(service, parent_id)
+
+        # Check if we've reached the root (parent is the drive itself or no parent)
+        if next_parent is None:
+            # This folder's name is either the drive root, My Drive, or Shared with me
+            if drive_id:
+                path_parts.insert(0, _get_drive_name(service, drive_id))
+            else:
+                # Not in a shared drive - determine if it's "My Drive" or "Shared with me"
+                if is_owned_by_user:
+                    path_parts.insert(0, "My Drive")
+                else:
+                    path_parts.insert(0, "Shared with me")
+            break
+        else:
+            path_parts.insert(0, folder_name)
+            parent_id = next_parent
+
+    # If we didn't find a root, determine the root based on ownership and drive
+    if not path_parts:
+        if drive_id:
+            return [_get_drive_name(service, drive_id)]
+        elif is_owned_by_user:
+            return ["My Drive"]
+        else:
+            return ["Shared with me"]
+
+    return path_parts
+
 
 # This is not a standard valid unicode char, it is used by the docs advanced API to
 # represent smart chips (elements like dates and doc links).
@@ -99,8 +250,7 @@ def onyx_document_id_from_drive_file(file: GoogleDriveFileType) -> str:
         else:
             link = template.format(file_id)
         logger.debug(
-            "Missing webViewLink for Google Drive file with id %s. "
-            "Falling back to constructed link %s",
+            "Missing webViewLink for Google Drive file with id %s. Falling back to constructed link %s",
             file_id,
             link,
         )
@@ -122,8 +272,13 @@ def download_request(
     """
     # For other file types, download the file
     # Use the correct API call for downloading files
-    request = service.files().get_media(fileId=file_id)
+    request = service.files().get_media(  # ty: ignore[unresolved-attribute]
+        fileId=file_id
+    )
     return _download_request(request, file_id, size_threshold)
+
+
+_DOWNLOAD_NUM_RETRIES = 3
 
 
 def _download_request(request: Any, file_id: str, size_threshold: int) -> bytes:
@@ -133,7 +288,10 @@ def _download_request(request: Any, file_id: str, size_threshold: int) -> bytes:
     )
     done = False
     while not done:
-        download_progress, done = downloader.next_chunk()
+        # num_retries enables automatic retry with exponential backoff for transient errors
+        download_progress, done = downloader.next_chunk(
+            num_retries=_DOWNLOAD_NUM_RETRIES
+        )
         if download_progress.resumable_progress > size_threshold:
             logger.warning(
                 f"File {file_id} exceeds size threshold of {size_threshold}. Skipping2."
@@ -152,7 +310,8 @@ def _download_and_extract_sections_basic(
     service: GoogleDriveService,
     allow_images: bool,
     size_threshold: int,
-) -> list[TextSection | ImageSection]:
+    raw_file_callback: RawFileCallback | None = None,
+) -> FileExtractionResult:
     """Extract text and images from a Google Drive file."""
     file_id = file["id"]
     file_name = file["name"]
@@ -165,13 +324,38 @@ def _download_and_extract_sections_basic(
     def response_call() -> bytes:
         return download_request(service, file_id, size_threshold)
 
+    def _extract_tabular(
+        raw_bytes: bytes, name: str, content_type: str
+    ) -> FileExtractionResult:
+        staged_file_id: str | None = None
+        if raw_file_callback is not None:
+            result = extract_and_stage_tabular_file(
+                file=io.BytesIO(raw_bytes),
+                file_name=name,
+                content_type=content_type,
+                raw_file_callback=raw_file_callback,
+                link=link,
+            )
+            tabular_sections = result.sections
+            staged_file_id = result.staged_file_id
+        else:
+            tabular_sections = tabular_file_to_sections(
+                io.BytesIO(raw_bytes),
+                file_name=name,
+                link=link,
+            )
+        sections: list[TextSection | ImageSection | TabularSection] = list(
+            tabular_sections
+        )
+        return FileExtractionResult(sections=sections, staged_file_id=staged_file_id)
+
     if mime_type in OnyxMimeTypes.IMAGE_MIME_TYPES:
         # Skip images if not explicitly enabled
         if not allow_images:
-            return []
+            return FileExtractionResult(sections=[])
 
         # Store images for later processing
-        sections: list[TextSection | ImageSection] = []
+        sections: list[TextSection | ImageSection | TabularSection] = []
         try:
             section, embedded_id = store_image_and_create_section(
                 image_data=response_call(),
@@ -184,55 +368,77 @@ def _download_and_extract_sections_basic(
             sections.append(section)
         except Exception as e:
             logger.error(f"Failed to process image {file_name}: {e}")
-        return sections
+        return FileExtractionResult(sections=sections)
 
-    # For Google Docs, Sheets, and Slides, export as plain text
+    # For Google Docs, Sheets, and Slides, export via the Drive API
     if mime_type in GOOGLE_MIME_TYPES_TO_EXPORT:
         export_mime_type = GOOGLE_MIME_TYPES_TO_EXPORT[mime_type]
-        # Use the correct API call for exporting files
-        request = service.files().export_media(
+        request = service.files().export_media(  # ty: ignore[unresolved-attribute]
             fileId=file_id, mimeType=export_mime_type
         )
         response = _download_request(request, file_id, size_threshold)
         if not response:
             logger.warning(f"Failed to export {file_name} as {export_mime_type}")
-            return []
+            return FileExtractionResult(sections=[])
+
+        if export_mime_type in OnyxMimeTypes.TABULAR_MIME_TYPES:
+            # Synthesize an extension on the filename
+            ext = ".xlsx" if export_mime_type == SPREADSHEET_MIME_TYPE else ".csv"
+            return _extract_tabular(
+                raw_bytes=response,
+                name=f"{file_name}{ext}",
+                content_type=export_mime_type,
+            )
 
         text = response.decode("utf-8")
-        return [TextSection(link=link, text=text)]
+        return FileExtractionResult(sections=[TextSection(link=link, text=text)])
 
     # Process based on mime type
     if mime_type == "text/plain":
         try:
             text = response_call().decode("utf-8")
-            return [TextSection(link=link, text=text)]
+            return FileExtractionResult(sections=[TextSection(link=link, text=text)])
         except UnicodeDecodeError as e:
             logger.warning(f"Failed to extract text from {file_name}: {e}")
-            return []
+            return FileExtractionResult(sections=[])
 
     elif (
         mime_type
         == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     ):
         text, _ = read_docx_file(io.BytesIO(response_call()))
-        return [TextSection(link=link, text=text)]
+        return FileExtractionResult(sections=[TextSection(link=link, text=text)])
 
     elif (
         mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        or is_tabular_file(file_name)
     ):
-        text = xlsx_to_text(io.BytesIO(response_call()), file_name=file_name)
-        return [TextSection(link=link, text=text)] if text else []
+        # Google Drive doesn't enforce file extensions, so the filename may not
+        # end in .xlsx even when the mime type says it's one. Synthesize the
+        # extension so tabular_file_to_sections dispatches correctly.
+        tabular_file_name = file_name
+        if (
+            mime_type
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            and not is_tabular_file(file_name)
+        ):
+            tabular_file_name = f"{file_name}.xlsx"
+        return _extract_tabular(
+            response_call(), name=tabular_file_name, content_type=mime_type
+        )
 
     elif (
         mime_type
         == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     ):
         text = pptx_to_text(io.BytesIO(response_call()), file_name=file_name)
-        return [TextSection(link=link, text=text)] if text else []
+        return FileExtractionResult(
+            sections=[TextSection(link=link, text=text)] if text else []
+        )
 
     elif mime_type == "application/pdf":
         text, _pdf_meta, images = read_pdf_file(io.BytesIO(response_call()))
-        pdf_sections: list[TextSection | ImageSection] = [
+        pdf_sections: list[TextSection | ImageSection | TabularSection] = [
             TextSection(link=link, text=text)
         ]
 
@@ -248,20 +454,20 @@ def _download_and_extract_sections_basic(
                 pdf_sections.append(section)
         except Exception as e:
             logger.error(f"Failed to process PDF images in {file_name}: {e}")
-        return pdf_sections
+        return FileExtractionResult(sections=pdf_sections)
 
     # Final attempt at extracting text
     file_ext = get_file_ext(file.get("name", ""))
     if file_ext not in OnyxFileExtensions.ALL_ALLOWED_EXTENSIONS:
         logger.warning(f"Skipping file {file.get('name')} due to extension.")
-        return []
+        return FileExtractionResult(sections=[])
 
     try:
         text = extract_file_text(io.BytesIO(response_call()), file_name)
-        return [TextSection(link=link, text=text)]
+        return FileExtractionResult(sections=[TextSection(link=link, text=text)])
     except Exception as e:
         logger.warning(f"Failed to extract text from {file_name}: {e}")
-        return []
+        return FileExtractionResult(sections=[])
 
 
 def _find_nth(haystack: str, needle: str, n: int, start: int = 0) -> int:
@@ -273,8 +479,9 @@ def _find_nth(haystack: str, needle: str, n: int, start: int = 0) -> int:
 
 
 def align_basic_advanced(
-    basic_sections: list[TextSection | ImageSection], adv_sections: list[TextSection]
-) -> list[TextSection | ImageSection]:
+    basic_sections: list[TextSection | ImageSection | TabularSection],
+    adv_sections: list[TextSection],
+) -> list[TextSection | ImageSection | TabularSection]:
     """Align the basic sections with the advanced sections.
     In particular, the basic sections contain all content of the file,
     including smart chips like dates and doc links. The advanced sections
@@ -291,12 +498,14 @@ def align_basic_advanced(
     basic_full_text = "".join(
         [section.text for section in basic_sections if isinstance(section, TextSection)]
     )
-    new_sections: list[TextSection | ImageSection] = []
+    new_sections: list[TextSection | ImageSection | TabularSection] = []
     heading_start = 0
     for adv_ind in range(1, len(adv_sections)):
         heading = adv_sections[adv_ind].text.split(HEADING_DELIMITER)[0]
         # retrieve the longest part of the heading that is not a smart chip
-        heading_key = max(heading.split(SMART_CHIP_CHAR), key=len).strip()
+        heading_key = max(  # ty: ignore[unresolved-attribute]
+            heading.split(SMART_CHIP_CHAR), key=len
+        ).strip()
         if heading_key == "":
             logger.warning(
                 f"Cannot match heading: {heading}, its link will come from the following section"
@@ -338,13 +547,28 @@ def _get_external_access_for_raw_gdrive_file(
     company_domain: str,
     retriever_drive_service: GoogleDriveService | None,
     admin_drive_service: GoogleDriveService,
+    fallback_user_email: str,
+    add_prefix: bool = False,
 ) -> ExternalAccess:
     """
     Get the external access for a raw Google Drive file.
+
+    add_prefix: When True, prefix group IDs with source type (for indexing path).
+               When False (default), leave unprefixed (for permission sync path
+               where upsert_document_external_perms handles prefixing).
+    fallback_user_email: When permission info can't be retrieved (e.g. externally-owned
+               files), fall back to granting access to this user.
     """
     external_access_fn = cast(
         Callable[
-            [GoogleDriveFileType, str, GoogleDriveService | None, GoogleDriveService],
+            [
+                GoogleDriveFileType,
+                str,
+                GoogleDriveService | None,
+                GoogleDriveService,
+                str,
+                bool,
+            ],
             ExternalAccess,
         ],
         fetch_versioned_implementation_with_fallback(
@@ -358,6 +582,8 @@ def _get_external_access_for_raw_gdrive_file(
         company_domain,
         retriever_drive_service,
         admin_drive_service,
+        fallback_user_email,
+        add_prefix,
     )
 
 
@@ -370,6 +596,7 @@ def convert_drive_item_to_document(
     permission_sync_context: PermissionSyncContext | None,
     retriever_emails: list[str],
     file: GoogleDriveFileType,
+    raw_file_callback: RawFileCallback | None = None,
 ) -> Document | ConnectorFailure | None:
     """
     Attempt to convert a drive item to a document with each retriever email
@@ -396,6 +623,7 @@ def convert_drive_item_to_document(
             retriever_email,
             file,
             permission_sync_context,
+            raw_file_callback,
         )
 
         # There are a variety of permissions-based errors that occasionally occur
@@ -441,11 +669,13 @@ def _convert_drive_item_to_document(
     # if not specified, we will not sync permissions
     # will also be a no-op if EE is not enabled
     permission_sync_context: PermissionSyncContext | None,
+    raw_file_callback: RawFileCallback | None = None,
 ) -> Document | ConnectorFailure | None:
     """
     Main entry point for converting a Google Drive file => Document object.
     """
-    sections: list[TextSection | ImageSection] = []
+    sections: list[TextSection | ImageSection | TabularSection] = []
+    staged_file_id: str | None = None
 
     # Only construct these services when needed
     def _get_drive_service() -> GoogleDriveService:
@@ -485,16 +715,24 @@ def _convert_drive_item_to_document(
                     doc_id=file.get("id", ""),
                 )
                 if doc_sections:
-                    sections = cast(list[TextSection | ImageSection], doc_sections)
+                    sections = cast(
+                        list[TextSection | ImageSection | TabularSection], doc_sections
+                    )
                     if any(SMART_CHIP_CHAR in section.text for section in doc_sections):
                         logger.debug(
-                            f"found smart chips in {file.get('name')},"
-                            " aligning with basic sections"
+                            f"found smart chips in {file.get('name')}, aligning with basic sections"
                         )
-                        basic_sections = _download_and_extract_sections_basic(
-                            file, _get_drive_service(), allow_images, size_threshold
+                        basic_extraction = _download_and_extract_sections_basic(
+                            file,
+                            _get_drive_service(),
+                            allow_images,
+                            size_threshold,
+                            raw_file_callback,
                         )
-                        sections = align_basic_advanced(basic_sections, doc_sections)
+                        sections = align_basic_advanced(
+                            basic_extraction.sections, doc_sections
+                        )
+                        staged_file_id = basic_extraction.staged_file_id
 
             except Exception as e:
                 logger.warning(
@@ -502,9 +740,15 @@ def _convert_drive_item_to_document(
                 )
         # Not Google Doc, attempt basic extraction
         else:
-            sections = _download_and_extract_sections_basic(
-                file, _get_drive_service(), allow_images, size_threshold
+            basic_extraction = _download_and_extract_sections_basic(
+                file,
+                _get_drive_service(),
+                allow_images,
+                size_threshold,
+                raw_file_callback,
             )
+            sections = basic_extraction.sections
+            staged_file_id = basic_extraction.staged_file_id
 
         # If we still don't have any sections, skip this file
         if not sections:
@@ -521,17 +765,40 @@ def _convert_drive_item_to_document(
                 admin_drive_service=get_drive_service(
                     creds, user_email=permission_sync_context.primary_admin_email
                 ),
+                add_prefix=True,  # Indexing path - prefix here
+                fallback_user_email=retriever_email,
             )
             if permission_sync_context
             else None
         )
+
+        # Build doc_metadata with hierarchy information
+        file_name = file.get("name", "")
+        mime_type = file.get("mimeType", "")
+        drive_id = file.get("driveId")
+
+        # Build full folder path by walking up the parent chain
+        # Pass retriever_email to determine if file is in "My Drive" vs "Shared with me"
+        source_path = build_folder_path(
+            file, _get_drive_service(), drive_id, retriever_email
+        )
+
+        doc_metadata = {
+            "hierarchy": {
+                "source_path": source_path,
+                "drive_id": drive_id,
+                "file_name": file_name,
+                "mime_type": mime_type,
+            }
+        }
 
         # Create the document
         return Document(
             id=doc_id,
             sections=sections,
             source=DocumentSource.GOOGLE_DRIVE,
-            semantic_identifier=file.get("name", ""),
+            semantic_identifier=file_name,
+            doc_metadata=doc_metadata,
             metadata={
                 "owner_names": ", ".join(
                     owner.get("displayName", "") for owner in file.get("owners", [])
@@ -541,6 +808,8 @@ def _convert_drive_item_to_document(
                 file.get("modifiedTime", "").replace("Z", "+00:00")
             ),
             external_access=external_access,
+            parent_hierarchy_raw_node_id=(file.get("parents") or [None])[0],
+            file_id=staged_file_id,
         )
     except Exception as e:
         doc_id = "unknown"
@@ -580,6 +849,7 @@ def build_slim_document(
     # if not specified, we will not sync permissions
     # will also be a no-op if EE is not enabled
     permission_sync_context: PermissionSyncContext | None,
+    retriever_email: str,
 ) -> SlimDocument | None:
     if file.get("mimeType") in [DRIVE_FOLDER_TYPE, DRIVE_SHORTCUT_TYPE]:
         return None
@@ -601,6 +871,7 @@ def build_slim_document(
                 creds,
                 user_email=permission_sync_context.primary_admin_email,
             ),
+            fallback_user_email=retriever_email,
         )
         if permission_sync_context
         else None
@@ -608,4 +879,5 @@ def build_slim_document(
     return SlimDocument(
         id=onyx_document_id_from_drive_file(file),
         external_access=external_access,
+        parent_hierarchy_raw_node_id=(file.get("parents") or [None])[0],
     )

@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 import ConfirmationModalLayout from "@/refresh-components/layouts/ConfirmationModalLayout";
-import Button from "@/refresh-components/buttons/Button";
-import Checkbox from "@/refresh-components/inputs/Checkbox";
+import { Button } from "@opal/components";
+import { Checkbox } from "@opal/components";
 import Text from "@/refresh-components/texts/Text";
 import { SvgAlertCircle } from "@opal/icons";
 interface MoveCustomAgentChatModalProps {
@@ -23,9 +23,7 @@ export default function MoveCustomAgentChatModal({
       title="Move Custom Agent Chat"
       onClose={onCancel}
       submit={
-        <Button primary onClick={() => onConfirm(doNotShowAgain)}>
-          Confirm Move
-        </Button>
+        <Button onClick={() => onConfirm(doNotShowAgain)}>Confirm Move</Button>
       }
     >
       <div className="flex flex-col gap-4">

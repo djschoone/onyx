@@ -88,14 +88,20 @@ spec:
               value: "true"
             - name: MCP_SERVER_PORT
               value: "{{ .Values.mcpServer.containerPorts.server }}"
+            - name: MCP_SERVER_HOST
+              value: "{{ .Values.global.host }}"
             {{- if .Values.mcpServer.corsOrigins }}
             - name: MCP_SERVER_CORS_ORIGINS
               value: "{{ .Values.mcpServer.corsOrigins }}"
             {{- end }}
             # API server connection for authentication and proxying
-            - name: API_SERVER_BASE_URL
+            # Uses full override variable to set the port instead of using default 8080
+            - name: API_SERVER_URL_OVERRIDE_FOR_HTTP_REQUESTS
               value: "http://{{ include "onyx.fullname" . }}-api-service:{{ .Values.api.service.servicePort }}"
             {{- include "onyx.envSecrets" . | nindent 12 }}
+            {{- with .Values.mcpServer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- with .Values.mcpServer.volumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}

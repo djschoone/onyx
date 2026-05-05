@@ -1,5 +1,5 @@
 import Button from "@/refresh-components/buttons/Button";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import { SvgChevronRight } from "@opal/icons";
 interface AdvancedOptionsToggleProps {
   showAdvancedOptions: boolean;
@@ -13,6 +13,7 @@ export function AdvancedOptionsToggle({
   title,
 }: AdvancedOptionsToggleProps) {
   return (
+    // TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved
     <Button
       internal
       leftIcon={({ className }) => (

@@ -28,26 +28,45 @@ from onyx.server.query_and_chat.streaming_models import OpenUrlUrls
 from onyx.server.query_and_chat.streaming_models import Packet
 from onyx.tools.interface import Tool
 from onyx.tools.models import OpenURLToolOverrideKwargs
+from onyx.tools.models import ToolCallException
 from onyx.tools.models import ToolResponse
 from onyx.tools.tool_implementations.open_url.models import WebContentProvider
 from onyx.tools.tool_implementations.open_url.url_normalization import (
     _default_url_normalizer,
 )
 from onyx.tools.tool_implementations.open_url.url_normalization import normalize_url
+from onyx.tools.tool_implementations.open_url.utils import (
+    filter_web_contents_with_no_title_or_content,
+)
 from onyx.tools.tool_implementations.web_search.providers import (
     get_default_content_provider,
 )
 from onyx.tools.tool_implementations.web_search.utils import (
     inference_section_from_internet_page_scrape,
 )
+from onyx.tools.tool_implementations.web_search.utils import MAX_CHARS_PER_URL
 from onyx.utils.logger import setup_logger
 from onyx.utils.threadpool_concurrency import run_functions_tuples_in_parallel
+from onyx.utils.url import normalize_url as normalize_web_content_url
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.contextvars import get_current_tenant_id
 
 logger = setup_logger()
 
 URLS_FIELD = "urls"
+
+# 2 minute timeout for parallel URL fetching to prevent indefinite hangs
+OPEN_URL_TIMEOUT_SECONDS = 2 * 60
+
+# Sometimes the LLM will ask for a lot of URLs, so we need to limit the total number of characters
+# otherwise this alone will completely flood the context and degrade experience.
+# Note that if a lot of the URLs contain very little content, this results in no truncation.
+MAX_CHARS_ACROSS_URLS = 10 * MAX_CHARS_PER_URL
+
+# Minimum content length to include a document (avoid tiny snippets)
+# This is for truncation purposes, if a document is small (unless it goes into truncation flow),
+# it still gets included normally.
+MIN_CONTENT_CHARS = 200
 
 
 class IndexedDocumentRequest(BaseModel):
@@ -177,12 +196,17 @@ def _resolve_urls_to_document_ids(
         normalized = normalize_url(url)
 
         if normalized:
-            # Get URL variants (with/without trailing slash) for database lookup
-            variants = _url_lookup_variants(normalized)
-            if variants:
-                normalized_map[url] = variants
+            # Some connectors (e.g. Notion) normalize to a non-URL canonical document
+            # identifier (e.g. a UUID) rather than a URL. In those cases, we should
+            # treat the normalized value as a document_id directly.
+            if normalized.startswith(("http://", "https://")):
+                # Get URL variants (with/without trailing slash) for database lookup
+                variants = _url_lookup_variants(normalized)
+                # Defensive fallback: if variant generation fails, still try the
+                # normalized URL itself.
+                normalized_map[url] = variants or {normalized}
             else:
-                unresolved.append(url)
+                normalized_map[url] = {normalized}
         else:
             # No normalizer found - could be a non-URL document ID (e.g., FILE_CONNECTOR__...)
             if url and not url.startswith(("http://", "https://")):
@@ -224,10 +248,20 @@ def _resolve_urls_to_document_ids(
     return matches, unresolved
 
 
+def _estimate_result_chars(result: dict[str, Any]) -> int:
+    """Estimate character count from document fields in a result dict."""
+    total = 0
+    for key, value in result.items():
+        if value is not None:
+            total += len(str(value))
+    return total
+
+
 def _convert_sections_to_llm_string_with_citations(
     sections: list[InferenceSection],
     existing_citation_mapping: dict[str, int],
     citation_start: int,
+    max_document_chars: int = MAX_CHARS_ACROSS_URLS,
 ) -> tuple[str, dict[int, str]]:
     """Convert InferenceSections to LLM string, reusing existing citations where available.
 
@@ -236,6 +270,8 @@ def _convert_sections_to_llm_string_with_citations(
         existing_citation_mapping: Mapping of document_id -> citation_num for
             documents that have already been cited.
         citation_start: Starting citation number for new citations.
+        max_document_chars: Maximum total characters from document fields.
+            Content will be truncated to fit within this budget.
 
     Returns:
         Tuple of (JSON string for LLM, citation_mapping dict).
@@ -264,8 +300,10 @@ def _convert_sections_to_llm_string_with_citations(
             citation_mapping[next_citation_id] = document_id
             next_citation_id += 1
 
-    # Second pass: build results
+    # Second pass: build results, respecting max_document_chars budget
     results = []
+    total_chars = 0
+
     for section in sections:
         chunk = section.center_chunk
         document_id = chunk.document_id
@@ -276,29 +314,45 @@ def _convert_sections_to_llm_string_with_citations(
         if chunk.updated_at:
             updated_at_str = chunk.updated_at.isoformat()
 
+        # Build result dict without content first to calculate metadata overhead
         result: dict[str, Any] = {
             "document": citation_id,
             "title": chunk.semantic_identifier,
         }
         if updated_at_str is not None:
             result["updated_at"] = updated_at_str
-        result["source_type"] = chunk.source_type.value
         if chunk.source_links:
             link = next(iter(chunk.source_links.values()), None)
             if link:
                 result["url"] = link
 
-        if "url" not in result:
-            result["document_identifier"] = document_id
-
         if chunk.metadata:
-            result["metadata"] = json.dumps(chunk.metadata)
-        result["content"] = section.combined_content
+            result["metadata"] = json.dumps(chunk.metadata, ensure_ascii=False)
 
+        # Calculate chars used by metadata fields (everything except content)
+        metadata_chars = _estimate_result_chars(result)
+
+        # Calculate remaining budget for content
+        remaining_budget = max_document_chars - total_chars - metadata_chars
+        content = section.combined_content
+
+        # Check if we have enough budget for meaningful content
+        if remaining_budget < MIN_CONTENT_CHARS:
+            # Not enough room for meaningful content, stop adding documents
+            break
+
+        # Truncate content if it exceeds remaining budget
+        if len(content) > remaining_budget:
+            content = content[:remaining_budget]
+
+        result["content"] = content
+
+        result_chars = _estimate_result_chars(result)
         results.append(result)
+        total_chars += result_chars
 
     output = {"results": results}
-    return json.dumps(output, indent=2), citation_mapping
+    return json.dumps(output, indent=2, ensure_ascii=False), citation_mapping
 
 
 class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
@@ -311,7 +365,7 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
         tool_id: int,
         emitter: Emitter,
         document_index: DocumentIndex,
-        user: User | None,
+        user: User,
         content_provider: WebContentProvider | None = None,
     ) -> None:
         """Initialize the OpenURLTool.
@@ -320,7 +374,7 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             tool_id: Unique identifier for this tool instance.
             emitter: Emitter for streaming packets to the client.
             document_index: Index handle for retrieving stored documents.
-            user: User context for ACL filtering.
+            user: User context for ACL filtering, anonymous users only see public docs.
             content_provider: Optional content provider. If not provided,
                 will use the default provider from the database or fall back
                 to the built-in Onyx web crawler.
@@ -360,10 +414,20 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
 
     @override
     @classmethod
-    def is_available(cls, db_session: Session) -> bool:
-        """OpenURLTool is always available since it falls back to built-in crawler."""
+    def is_available(cls, db_session: Session) -> bool:  # noqa: ARG003
+        """OpenURLTool is available unless the vector DB is disabled.
+
+        The tool uses id_based_retrieval to match URLs to indexed documents,
+        which requires a vector database. When DISABLE_VECTOR_DB is set, the
+        tool is disabled entirely.
+        """
+        from onyx.configs.app_configs import DISABLE_VECTOR_DB
+
+        if DISABLE_VECTOR_DB:
+            return False
+
         # The tool can use either a configured provider or the built-in crawler,
-        # so it's always available
+        # so it's always available when the vector DB is present
         return True
 
     def tool_definition(self) -> dict:
@@ -379,16 +443,8 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "List of URLs or document identifiers to open and read. "
-                                "Can be a single URL/identifier or multiple. "
-                                "Accepts: (1) Raw URLs (e.g., 'https://docs.google.com/document/d/123/edit'), "
-                                "(2) Normalized document IDs from search results "
-                                "(e.g., 'https://docs.google.com/document/d/123'), "
-                                "or (3) Non-URL document identifiers for file connectors "
-                                "(e.g., 'FILE_CONNECTOR__abc-123'). "
-                                "Use the 'document_identifier' field from search results when 'url' is not available. "
-                                "You can extract URLs or document_identifier values from search results "
-                                "to read those documents in full."
+                                "List of URLs to open and read, can be a single URL or multiple URLs. "
+                                "This will return the text content of the page(s)."
                             ),
                         },
                     },
@@ -425,8 +481,21 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
         """
         urls = _normalize_string_list(llm_kwargs.get(URLS_FIELD))
 
+        if len(urls) > override_kwargs.max_urls:
+            logger.warning(
+                f"OpenURL tool received {len(urls)} URLs, but the max is {override_kwargs.max_urls}."
+            )
+            urls = urls[: override_kwargs.max_urls]
+
         if not urls:
-            raise ValueError("OpenURL requires at least one URL to run.")
+            raise ToolCallException(
+                message=f"Missing required '{URLS_FIELD}' parameter in open_url tool call",
+                llm_facing_message=(
+                    f"The open_url tool requires a '{URLS_FIELD}' parameter "
+                    f"containing an array of URLs. Please provide "
+                    f'like: {{"urls": ["https://example.com"]}}'
+                ),
+            )
 
         self.emitter.emit(
             Packet(
@@ -435,20 +504,14 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             )
         )
 
-        logger.info(f"OpenURL tool called with {len(urls)} URLs")
-
         with get_session_with_current_tenant() as db_session:
             # Resolve URLs to document IDs for indexed retrieval
             # Handles both raw URLs and already-normalized document IDs
             url_requests, unresolved_urls = _resolve_urls_to_document_ids(
                 urls, db_session
             )
-            logger.info(
-                f"Resolved {len(url_requests)} URLs to indexed document IDs for parallel retrieval"
-            )
 
             all_requests = _dedupe_document_requests(url_requests)
-            logger.info(f"Total unique document requests: {len(all_requests)}")
 
             # Create mapping from URL to document_id for result merging
             url_to_doc_id: dict[str, str] = {}
@@ -467,20 +530,47 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
                 """Wrapper for parallel execution with pre-built filters."""
                 return self._retrieve_indexed_documents_with_filters(requests, filters)
 
+            # Track if timeout occurred for error reporting
+            timeout_occurred = [False]  # Using list for mutability in closure
+
+            def _timeout_handler(
+                index: int,  # noqa: ARG001
+                func: Any,  # noqa: ARG001
+                args: tuple[Any, ...],  # noqa: ARG001
+            ) -> None:
+                timeout_occurred[0] = True
+                return None
+
             # Run indexed retrieval and crawling in parallel for all URLs
             # This allows us to compare results and pick the best representation
+            # Note: allow_failures=True ensures we get partial results even if one
+            # task times out or fails - the other task's results will still be used
             indexed_result, crawled_result = run_functions_tuples_in_parallel(
                 [
                     (_retrieve_indexed_with_filters, (all_requests,)),
-                    (self._fetch_web_content, (urls,)),
+                    (self._fetch_web_content, (urls, override_kwargs.url_snippet_map)),
                 ],
                 allow_failures=True,
+                timeout=OPEN_URL_TIMEOUT_SECONDS,
+                timeout_callback=_timeout_handler,
             )
 
             indexed_result = indexed_result or IndexedRetrievalResult(
                 sections=[], missing_document_ids=[]
             )
             crawled_sections, failed_web_urls = crawled_result or ([], [])
+
+            # If timeout occurred and we have no successful results from either path,
+            # return a timeout-specific error message
+            if (
+                timeout_occurred[0]
+                and not indexed_result.sections
+                and not crawled_sections
+            ):
+                return ToolResponse(
+                    rich_response=None,
+                    llm_facing_response="The call to open_url timed out",
+                )
 
             # Last-resort: attempt link-based lookup for URLs that failed both
             # document-ID resolution and crawling.
@@ -518,7 +608,13 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
                 if failure_descriptions
                 else "Failed to fetch content from the requested resources."
             )
+            logger.warning(f"OpenURL tool failed: {failure_msg}")
             return ToolResponse(rich_response=None, llm_facing_response=failure_msg)
+
+        for section in inference_sections:
+            chunk = section.center_chunk
+            if not chunk.semantic_identifier and chunk.source_links:
+                chunk.semantic_identifier = chunk.source_links[0]
 
         # Convert sections to search docs, preserving source information
         search_docs = convert_inference_sections_to_search_docs(
@@ -532,6 +628,9 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             )
         )
 
+        # Note that with this call, some contents may be truncated or dropped so what the LLM sees may not be the entire set
+        # That said, it is still the best experience to show all the docs that were fetched, even if the LLM on rare
+        # occasions only actually sees a subset.
         docs_str, citation_mapping = _convert_sections_to_llm_string_with_citations(
             sections=inference_sections,
             existing_citation_mapping=override_kwargs.citation_mapping,
@@ -577,11 +676,6 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
         if not fallback_urls:
             return failed_web_urls
 
-        logger.info(
-            "Attempting link-based lookup for %d URLs that lacked "
-            "document IDs and failed crawling",
-            len(fallback_urls),
-        )
         fallback_requests = _lookup_document_ids_by_link(fallback_urls, db_session)
 
         if not fallback_requests:
@@ -616,10 +710,6 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             return IndexedRetrievalResult(sections=[], missing_document_ids=[])
 
         document_ids = [req.document_id for req in all_requests]
-        logger.info(
-            f"Retrieving {len(all_requests)} indexed documents from Vespa. "
-            f"Document IDs: {document_ids}"
-        )
         chunk_requests = [
             VespaChunkRequest(document_id=request.document_id)
             for request in all_requests
@@ -630,9 +720,6 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
                 chunk_requests=chunk_requests,
                 filters=filters,
                 batch_retrieval=True,
-            )
-            logger.info(
-                f"Retrieved {len(chunks)} chunks from Vespa for {len(all_requests)} document requests"
             )
         except Exception as exc:
             logger.warning(
@@ -654,16 +741,8 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
         for request in all_requests:
             doc_chunks = chunk_map.get(request.document_id)
             if not doc_chunks:
-                logger.warning(
-                    f"No chunks found in Vespa for document_id: {request.document_id} "
-                    f"(original_url: {request.original_url})"
-                )
                 missing.append(request.document_id)
                 continue
-            logger.info(
-                f"Found {len(doc_chunks)} chunks for document_id: {request.document_id} "
-                f"(original_url: {request.original_url})"
-            )
             doc_chunks.sort(key=lambda chunk: chunk.chunk_id)
             section = inference_section_from_chunks(
                 center_chunk=doc_chunks[0],
@@ -672,15 +751,8 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             if section:
                 sections.append(section)
             else:
-                logger.warning(
-                    f"Failed to create InferenceSection from chunks for document_id: {request.document_id}"
-                )
                 missing.append(request.document_id)
 
-        logger.info(
-            f"Retrieved {len(sections)} documents successfully, {len(missing)} missing. "
-            f"Missing document IDs: {missing}"
-        )
         return IndexedRetrievalResult(sections=sections, missing_document_ids=missing)
 
     def _build_index_filters(self, db_session: Session) -> IndexFilters:
@@ -692,8 +764,7 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             tags=None,
             access_control_list=access_control_list,
             tenant_id=get_current_tenant_id() if MULTI_TENANT else None,
-            user_file_ids=None,
-            project_id=None,
+            project_id_filter=None,
         )
 
     def _merge_indexed_and_crawled_results(
@@ -702,7 +773,7 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
         crawled_sections: list[InferenceSection],
         url_to_doc_id: dict[str, str],
         all_urls: list[str],
-        failed_web_urls: list[str],
+        failed_web_urls: list[str],  # noqa: ARG002
     ) -> list[InferenceSection]:
         """Merge indexed and crawled results, preferring indexed when available.
 
@@ -732,19 +803,19 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
         for url in all_urls:
             doc_id = url_to_doc_id.get(url)
             indexed_section = indexed_by_doc_id.get(doc_id) if doc_id else None
-            crawled_section = crawled_by_url.get(url)
+            # WebContent.link is normalized (query/fragment stripped). Match on the
+            # same normalized form to avoid dropping successful crawl results.
+            crawled_section = crawled_by_url.get(normalize_web_content_url(url))
 
             if indexed_section and indexed_section.combined_content:
                 # Prefer indexed
                 merged_sections.append(indexed_section)
                 if doc_id:
                     used_doc_ids.add(doc_id)
-                logger.debug(f"Using indexed content for URL: {url} (doc_id: {doc_id})")
             elif crawled_section and crawled_section.combined_content:
                 # Fallback to crawled if indexed unavailable or empty
                 # (e.g., auth issues, document not indexed, etc.)
                 merged_sections.append(crawled_section)
-                logger.debug(f"Using crawled content for URL: {url}")
 
         # Add any indexed sections that weren't matched to URLs
         for doc_id, section in indexed_by_doc_id.items():
@@ -752,29 +823,31 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             if doc_id not in used_doc_ids:
                 merged_sections.append(section)
 
-        logger.info(
-            f"Merged results: {len(merged_sections)} total sections "
-            f"({len([s for s in merged_sections if s.center_chunk.document_id in indexed_by_doc_id])} indexed, "
-            f"{len([s for s in merged_sections if s.center_chunk.document_id not in indexed_by_doc_id])} crawled)"
-        )
-
         return merged_sections
 
     def _fetch_web_content(
-        self, urls: list[str]
+        self, urls: list[str], url_snippet_map: dict[str, str]
     ) -> tuple[list[InferenceSection], list[str]]:
         if not urls:
             return [], []
 
-        web_contents = self._provider.contents(urls)
+        raw_web_contents = self._provider.contents(urls)
+        # Treat "no title and no content" as a failure for that URL, but don't
+        # include the empty entry in downstream prompting/sections.
+        failed_urls: list[str] = [
+            content.link
+            for content in raw_web_contents
+            if not content.title.strip() and not content.full_content.strip()
+        ]
+        web_contents = filter_web_contents_with_no_title_or_content(raw_web_contents)
         sections: list[InferenceSection] = []
-        failed_urls: list[str] = []
 
         for content in web_contents:
             # Check if content is insufficient (e.g., "Loading..." or too short)
             text_stripped = content.full_content.strip()
             is_insufficient = (
                 not text_stripped
+                # TODO: Likely a behavior of our scraper, understand why this special pattern occurs
                 or text_stripped.lower() == "loading..."
                 or len(text_stripped) < 50
             )
@@ -784,8 +857,15 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
                 and content.full_content
                 and not is_insufficient
             ):
-                sections.append(inference_section_from_internet_page_scrape(content))
+                sections.append(
+                    inference_section_from_internet_page_scrape(
+                        content, url_snippet_map.get(content.link, "")
+                    )
+                )
             else:
+                # TODO: Slight improvement - if failed URL reasons are passed back to the LLM
+                # for example, if it tries to crawl Reddit and fails, it should know (probably) that this error would
+                # happen again if it tried to crawl Reddit again.
                 failed_urls.append(content.link or "")
 
         return sections, failed_urls

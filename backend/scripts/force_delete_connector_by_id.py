@@ -20,33 +20,27 @@ sys.path.append(parent_dir)
 # flake8: noqa: E402
 
 # Now import Onyx modules
-from onyx.db.models import (
-    DocumentSet__ConnectorCredentialPair,
-    UserGroup__ConnectorCredentialPair,
-)
+from onyx.configs.constants import DocumentSource
 from onyx.db.connector import fetch_connector_by_id
+from onyx.db.connector_credential_pair import get_connector_credential_pair
+from onyx.db.connector_credential_pair import get_connector_credential_pair_from_id
 from onyx.db.document import get_documents_for_connector_credential_pair
-from onyx.db.index_attempt import (
-    delete_index_attempts,
-    cancel_indexing_attempts_for_ccpair,
-)
+from onyx.db.engine.sql_engine import get_session_with_current_tenant
+from onyx.db.index_attempt import cancel_indexing_attempts_for_ccpair
+from onyx.db.index_attempt import delete_index_attempts
+from onyx.db.models import ConnectorCredentialPair
+from onyx.db.models import DocumentSet__ConnectorCredentialPair
+from onyx.db.models import UserGroup__ConnectorCredentialPair
 from onyx.db.permission_sync_attempt import (
     delete_doc_permission_sync_attempts__no_commit,
 )
 from onyx.db.permission_sync_attempt import (
     delete_external_group_permission_sync_attempts__no_commit,
 )
-from onyx.db.models import ConnectorCredentialPair
+from onyx.document_index.factory import get_all_document_indices
 from onyx.document_index.interfaces import DocumentIndex
-from onyx.utils.logger import setup_logger
-from onyx.configs.constants import DocumentSource
-from onyx.db.connector_credential_pair import (
-    get_connector_credential_pair_from_id,
-    get_connector_credential_pair,
-)
-from onyx.db.engine.sql_engine import get_session_with_current_tenant
-from onyx.document_index.factory import get_default_document_index
 from onyx.file_store.file_store import get_default_file_store
+from onyx.utils.logger import setup_logger
 
 # pylint: enable=E402
 # flake8: noqa: E402
@@ -59,7 +53,7 @@ _DELETION_BATCH_SIZE = 1000
 
 def _unsafe_deletion(
     db_session: Session,
-    document_index: DocumentIndex,
+    document_indices: list[DocumentIndex],
     cc_pair: ConnectorCredentialPair,
     pair_id: int,
 ) -> int:
@@ -80,11 +74,12 @@ def _unsafe_deletion(
             break
 
         for document in documents:
-            document_index.delete_single(
-                doc_id=document.id,
-                tenant_id=POSTGRES_DEFAULT_SCHEMA,
-                chunk_count=document.chunk_count,
-            )
+            for document_index in document_indices:
+                document_index.delete_single(
+                    doc_id=document.id,
+                    tenant_id=POSTGRES_DEFAULT_SCHEMA,
+                    chunk_count=document.chunk_count,
+                )
 
         delete_documents_complete__no_commit(
             db_session=db_session,
@@ -211,14 +206,16 @@ def _delete_connector(cc_pair_id: int, db_session: Session) -> None:
     try:
         logger.notice("Deleting information from Vespa and Postgres")
         active_search_settings = get_active_search_settings(db_session)
-        document_index = get_default_document_index(
+        # This flow is for deletion so we get all indices.
+        document_indices = get_all_document_indices(
             active_search_settings.primary,
             active_search_settings.secondary,
+            None,
         )
 
         files_deleted_count = _unsafe_deletion(
             db_session=db_session,
-            document_index=document_index,
+            document_indices=document_indices,
             cc_pair=cc_pair,
             pair_id=cc_pair_id,
         )

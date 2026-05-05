@@ -22,6 +22,7 @@ from typing_extensions import override
 from onyx.access.models import ExternalAccess
 from onyx.configs.app_configs import GITHUB_CONNECTOR_BASE_URL
 from onyx.configs.constants import DocumentSource
+from onyx.connectors.connector_runner import CheckpointOutputWrapper
 from onyx.connectors.connector_runner import ConnectorRunner
 from onyx.connectors.exceptions import ConnectorValidationError
 from onyx.connectors.exceptions import CredentialExpiredError
@@ -35,10 +36,16 @@ from onyx.connectors.interfaces import CheckpointedConnectorWithPermSync
 from onyx.connectors.interfaces import CheckpointOutput
 from onyx.connectors.interfaces import ConnectorCheckpoint
 from onyx.connectors.interfaces import ConnectorFailure
+from onyx.connectors.interfaces import GenerateSlimDocumentOutput
+from onyx.connectors.interfaces import IndexingHeartbeatInterface
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
+from onyx.connectors.interfaces import SlimConnector
+from onyx.connectors.interfaces import SlimConnectorWithPermSync
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
 from onyx.connectors.models import DocumentFailure
+from onyx.connectors.models import HierarchyNode
+from onyx.connectors.models import SlimDocument
 from onyx.connectors.models import TextSection
 from onyx.utils.logger import setup_logger
 
@@ -240,8 +247,21 @@ def _get_userinfo(user: NamedUser) -> dict[str, str]:
 def _convert_pr_to_document(
     pull_request: PullRequest, repo_external_access: ExternalAccess | None
 ) -> Document:
-    repo_name = pull_request.base.repo.full_name if pull_request.base else ""
-    doc_metadata = DocMetadata(repo=repo_name)
+    repo_full_name = pull_request.base.repo.full_name if pull_request.base else ""
+    # Split full_name (e.g., "owner/repo") into owner and repo
+    parts = repo_full_name.split("/", 1)
+    owner_name = parts[0] if parts else ""
+    repo_name = parts[1] if len(parts) > 1 else repo_full_name
+
+    doc_metadata = {
+        "repo": repo_full_name,
+        "hierarchy": {
+            "source_path": [owner_name, repo_name, "pull_requests"],
+            "owner": owner_name,
+            "repo": repo_name,
+            "object_type": "pull_request",
+        },
+    }
     return Document(
         id=pull_request.html_url,
         sections=[
@@ -259,7 +279,7 @@ def _convert_pr_to_document(
             else None
         ),
         # this metadata is used in perm sync
-        doc_metadata=doc_metadata.model_dump(),
+        doc_metadata=doc_metadata,
         metadata={
             k: [str(vi) for vi in v] if isinstance(v, list) else str(v)
             for k, v in {
@@ -316,8 +336,21 @@ def _fetch_issue_comments(issue: Issue) -> str:
 def _convert_issue_to_document(
     issue: Issue, repo_external_access: ExternalAccess | None
 ) -> Document:
-    repo_name = issue.repository.full_name if issue.repository else ""
-    doc_metadata = DocMetadata(repo=repo_name)
+    repo_full_name = issue.repository.full_name if issue.repository else ""
+    # Split full_name (e.g., "owner/repo") into owner and repo
+    parts = repo_full_name.split("/", 1)
+    owner_name = parts[0] if parts else ""
+    repo_name = parts[1] if len(parts) > 1 else repo_full_name
+
+    doc_metadata = {
+        "repo": repo_full_name,
+        "hierarchy": {
+            "source_path": [owner_name, repo_name, "issues"],
+            "owner": owner_name,
+            "repo": repo_name,
+            "object_type": "issue",
+        },
+    }
     return Document(
         id=issue.html_url,
         sections=[TextSection(link=issue.html_url, text=issue.body or "")],
@@ -327,7 +360,7 @@ def _convert_issue_to_document(
         # updated_at is UTC time but is timezone unaware
         doc_updated_at=issue.updated_at.replace(tzinfo=timezone.utc),
         # this metadata is used in perm sync
-        doc_metadata=doc_metadata.model_dump(),
+        doc_metadata=doc_metadata,
         metadata={
             k: [str(vi) for vi in v] if isinstance(v, list) else str(v)
             for k, v in {
@@ -401,7 +434,11 @@ def make_cursor_url_callback(
     return cursor_url_callback
 
 
-class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoint]):
+class GithubConnector(
+    CheckpointedConnectorWithPermSync[GithubConnectorCheckpoint],
+    SlimConnector,
+    SlimConnectorWithPermSync,
+):
     def __init__(
         self,
         repo_owner: str,
@@ -497,6 +534,22 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
             sleep_after_rate_limit_exception(github_client)
             return self.get_all_repos(github_client, attempt_num + 1)
 
+    def fetch_configured_repos(self) -> list[Repository.Repository]:
+        """
+        Fetch the configured repositories based on the connector settings.
+
+        Returns:
+            list[Repository.Repository]: The configured repositories.
+        """
+        assert self.github_client is not None  # mypy
+        if self.repositories:
+            if "," in self.repositories:
+                return self.get_github_repos(self.github_client)
+            else:
+                return [self.get_github_repo(self.github_client)]
+        else:
+            return self.get_all_repos(self.github_client)
+
     def _pull_requests_func(
         self, repo: Repository.Repository
     ) -> Callable[[], PaginatedList[PullRequest]]:
@@ -517,6 +570,7 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
         start: datetime | None = None,
         end: datetime | None = None,
         include_permissions: bool = False,
+        is_slim: bool = False,
     ) -> Generator[Document | ConnectorFailure, None, GithubConnectorCheckpoint]:
         if self.github_client is None:
             raise ConnectorMissingCredentialError("GitHub")
@@ -525,17 +579,7 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
 
         # First run of the connector, fetch all repos and store in checkpoint
         if checkpoint.cached_repo_ids is None:
-            repos = []
-            if self.repositories:
-                if "," in self.repositories:
-                    # Multiple repositories specified
-                    repos = self.get_github_repos(self.github_client)
-                else:
-                    # Single repository (backward compatibility)
-                    repos = [self.get_github_repo(self.github_client)]
-            else:
-                # All repositories
-                repos = self.get_all_repos(self.github_client)
+            repos = self.fetch_configured_repos()
             if not repos:
                 checkpoint.has_more = False
                 return checkpoint
@@ -582,36 +626,46 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
             for pr in pr_batch:
                 num_prs += 1
 
-                # we iterate backwards in time, so at this point we stop processing prs
-                if (
-                    start is not None
-                    and pr.updated_at
-                    and pr.updated_at.replace(tzinfo=timezone.utc) < start
-                ):
-                    done_with_prs = True
-                    break
-                # Skip PRs updated after the end date
-                if (
-                    end is not None
-                    and pr.updated_at
-                    and pr.updated_at.replace(tzinfo=timezone.utc) > end
-                ):
-                    continue
-                try:
-                    yield _convert_pr_to_document(
-                        cast(PullRequest, pr), repo_external_access
+                if is_slim:
+                    yield Document(
+                        id=pr.html_url,
+                        sections=[],
+                        external_access=repo_external_access,
+                        source=DocumentSource.GITHUB,
+                        semantic_identifier="",
+                        metadata={},
                     )
-                except Exception as e:
-                    error_msg = f"Error converting PR to document: {e}"
-                    logger.exception(error_msg)
-                    yield ConnectorFailure(
-                        failed_document=DocumentFailure(
-                            document_id=str(pr.id), document_link=pr.html_url
-                        ),
-                        failure_message=error_msg,
-                        exception=e,
-                    )
-                    continue
+                else:
+                    # we iterate backwards in time, so at this point we stop processing prs
+                    if (
+                        start is not None
+                        and pr.updated_at
+                        and pr.updated_at.replace(tzinfo=timezone.utc) < start
+                    ):
+                        done_with_prs = True
+                        break
+                    # Skip PRs updated after the end date
+                    if (
+                        end is not None
+                        and pr.updated_at
+                        and pr.updated_at.replace(tzinfo=timezone.utc) > end
+                    ):
+                        continue
+                    try:
+                        yield _convert_pr_to_document(
+                            cast(PullRequest, pr), repo_external_access
+                        )
+                    except Exception as e:
+                        error_msg = f"Error converting PR to document: {e}"
+                        logger.exception(error_msg)
+                        yield ConnectorFailure(
+                            failed_document=DocumentFailure(
+                                document_id=str(pr.id), document_link=pr.html_url
+                            ),
+                            failure_message=error_msg,
+                            exception=e,
+                        )
+                        continue
 
             # If we reach this point with a cursor url in the checkpoint, we were using
             # the fallback cursor-based pagination strategy. That strategy tries to get all
@@ -657,38 +711,47 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
             for issue in issue_batch:
                 num_issues += 1
                 issue = cast(Issue, issue)
-                # we iterate backwards in time, so at this point we stop processing prs
-                if (
-                    start is not None
-                    and issue.updated_at.replace(tzinfo=timezone.utc) < start
-                ):
-                    done_with_issues = True
-                    break
-                # Skip PRs updated after the end date
-                if (
-                    end is not None
-                    and issue.updated_at.replace(tzinfo=timezone.utc) > end
-                ):
-                    continue
-
                 if issue.pull_request is not None:
                     # PRs are handled separately
                     continue
 
-                try:
-                    yield _convert_issue_to_document(issue, repo_external_access)
-                except Exception as e:
-                    error_msg = f"Error converting issue to document: {e}"
-                    logger.exception(error_msg)
-                    yield ConnectorFailure(
-                        failed_document=DocumentFailure(
-                            document_id=str(issue.id),
-                            document_link=issue.html_url,
-                        ),
-                        failure_message=error_msg,
-                        exception=e,
+                if is_slim:
+                    yield Document(
+                        id=issue.html_url,
+                        sections=[],
+                        external_access=repo_external_access,
+                        source=DocumentSource.GITHUB,
+                        semantic_identifier="",
+                        metadata={},
                     )
-                    continue
+                else:
+                    # we iterate backwards in time, so at this point we stop processing issues
+                    if (
+                        start is not None
+                        and issue.updated_at.replace(tzinfo=timezone.utc) < start
+                    ):
+                        done_with_issues = True
+                        break
+                    # Skip issues updated after the end date
+                    if (
+                        end is not None
+                        and issue.updated_at.replace(tzinfo=timezone.utc) > end
+                    ):
+                        continue
+                    try:
+                        yield _convert_issue_to_document(issue, repo_external_access)
+                    except Exception as e:
+                        error_msg = f"Error converting issue to document: {e}"
+                        logger.exception(error_msg)
+                        yield ConnectorFailure(
+                            failed_document=DocumentFailure(
+                                document_id=str(issue.id),
+                                document_link=issue.html_url,
+                            ),
+                            failure_message=error_msg,
+                            exception=e,
+                        )
+                        continue
 
             logger.info(f"Fetched {num_issues} issues for repo: {repo.name}")
             # if we found any issues on the page, and we're not done, return the checkpoint.
@@ -771,6 +834,60 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
             start, end, checkpoint, include_permissions=True
         )
 
+    def _retrieve_slim_docs(
+        self,
+        include_permissions: bool,
+        callback: IndexingHeartbeatInterface | None = None,
+    ) -> GenerateSlimDocumentOutput:
+        """Iterate all PRs and issues across all configured repos as SlimDocuments.
+
+        Drives _fetch_from_github in a checkpoint loop — each call processes one
+        page and returns an updated checkpoint. CheckpointOutputWrapper handles
+        draining the generator and extracting the returned checkpoint. Rate
+        limiting and pagination are handled centrally by _fetch_from_github via
+        _get_batch_rate_limited.
+        """
+        checkpoint = self.build_dummy_checkpoint()
+        while checkpoint.has_more:
+            batch: list[SlimDocument | HierarchyNode] = []
+            gen = self._fetch_from_github(
+                checkpoint, include_permissions=include_permissions, is_slim=True
+            )
+            wrapper: CheckpointOutputWrapper[GithubConnectorCheckpoint] = (
+                CheckpointOutputWrapper()
+            )
+            for document, _, _, next_checkpoint in wrapper(gen):
+                if document is not None:
+                    batch.append(
+                        SlimDocument(
+                            id=document.id, external_access=document.external_access
+                        )
+                    )
+                if next_checkpoint is not None:
+                    checkpoint = next_checkpoint
+            if batch:
+                yield batch
+            if callback and callback.should_stop():
+                raise RuntimeError("github_slim_docs: Stop signal detected")
+
+    @override
+    def retrieve_all_slim_docs(
+        self,
+        start: SecondsSinceUnixEpoch | None = None,
+        end: SecondsSinceUnixEpoch | None = None,
+        callback: IndexingHeartbeatInterface | None = None,
+    ) -> GenerateSlimDocumentOutput:
+        return self._retrieve_slim_docs(include_permissions=False, callback=callback)
+
+    @override
+    def retrieve_all_slim_docs_perm_sync(
+        self,
+        start: SecondsSinceUnixEpoch | None = None,
+        end: SecondsSinceUnixEpoch | None = None,
+        callback: IndexingHeartbeatInterface | None = None,
+    ) -> GenerateSlimDocumentOutput:
+        return self._retrieve_slim_docs(include_permissions=True, callback=callback)
+
     def validate_connector_settings(self) -> None:
         if self.github_client is None:
             raise ConnectorMissingCredentialError("GitHub credentials not loaded.")
@@ -833,8 +950,7 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
                     total_count = org.get_repos().totalCount
                     if total_count == 0:
                         raise ConnectorValidationError(
-                            f"Found no repos for organization: {self.repo_owner}. "
-                            "Does the credential have the right scopes?"
+                            f"Found no repos for organization: {self.repo_owner}. Does the credential have the right scopes?"
                         )
                 except GithubException as e:
                     # Check for missing SSO
@@ -857,8 +973,7 @@ class GithubConnector(CheckpointedConnectorWithPermSync[GithubConnectorCheckpoin
                     total_count = user.get_repos().totalCount
                     if total_count == 0:
                         raise ConnectorValidationError(
-                            f"Found no repos for user: {self.repo_owner}. "
-                            "Does the credential have the right scopes?"
+                            f"Found no repos for user: {self.repo_owner}. Does the credential have the right scopes?"
                         )
 
         except RateLimitExceededException:
@@ -943,7 +1058,9 @@ if __name__ == "__main__":
 
     # Run the connector
     while checkpoint.has_more:
-        for doc_batch, failure, next_checkpoint in runner.run(checkpoint):
+        for doc_batch, hierarchy_node_batch, failure, next_checkpoint in runner.run(
+            checkpoint
+        ):
             if doc_batch:
                 print(f"Retrieved batch of {len(doc_batch)} documents")
                 for doc in doc_batch:

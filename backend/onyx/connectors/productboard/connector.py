@@ -9,6 +9,7 @@ from dateutil import parser
 from retry import retry
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.cross_connector_utils.miscellaneous_utils import time_str_to_utc
 from onyx.connectors.interfaces import GenerateDocumentsOutput
@@ -16,9 +17,9 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.utils.logger import setup_logger
-
 
 logger = setup_logger()
 
@@ -68,14 +69,15 @@ class ProductboardConnector(PollConnector):
 
         @retry(tries=3, delay=1, backoff=2)
         def fetch(link: str) -> dict[str, Any]:
-            response = requests.get(link, headers=headers)
+            response = requests.get(
+                link, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS
+            )
             if not response.ok:
                 # rate-limiting is at 50 requests per second.
                 # The delay in this retry should handle this while this is
                 # not parallelized.
                 raise ProductboardApiError(
-                    "Failed to fetch from productboard - status code:"
-                    f" {response.status_code} - response: {response.text}"
+                    f"Failed to fetch from productboard - status code: {response.status_code} - response: {response.text}"
                 )
 
             return response.json()
@@ -228,7 +230,7 @@ class ProductboardConnector(PollConnector):
                 "Access token is not set up, was load_credentials called?"
             )
 
-        document_batch: list[Document] = []
+        document_batch: list[Document | HierarchyNode] = []
 
         # NOTE: there is a concept of a "Note" in productboard, however
         # there is no read API for it atm. Additionally, comments are not

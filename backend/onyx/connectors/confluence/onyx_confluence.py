@@ -26,7 +26,7 @@ from typing import TypeVar
 from urllib.parse import quote
 
 import bs4
-from atlassian import Confluence  # type:ignore
+from atlassian import Confluence
 from redis import Redis
 from requests import HTTPError
 
@@ -61,6 +61,9 @@ _USER_NOT_FOUND = "Unknown Confluence User"
 _USER_ID_TO_DISPLAY_NAME_CACHE: dict[str, str | None] = {}
 _USER_EMAIL_CACHE: dict[str, str | None] = {}
 _DEFAULT_PAGINATION_LIMIT = 1000
+_MINIMUM_PAGINATION_LIMIT = 5
+
+_SERVER_ERROR_CODES = {500, 502, 503, 504}
 
 _CONFLUENCE_SPACES_API_V1 = "rest/api/space"
 _CONFLUENCE_SPACES_API_V2 = "wiki/api/v2/spaces"
@@ -123,7 +126,7 @@ class OnyxConfluence:
 
         self.shared_base_kwargs: dict[str, str | int | bool] = {
             "api_version": "cloud" if is_cloud else "latest",
-            "backoff_and_retry": True,
+            "backoff_and_retry": False,
             "cloud": is_cloud,
         }
         if timeout:
@@ -296,8 +299,7 @@ class OnyxConfluence:
         except HTTPError as e:
             if e.response.status_code == 404 and use_v2:
                 logger.warning(
-                    "v2 spaces API returned 404, falling back to v1 API. "
-                    "This may indicate an older Confluence Cloud instance."
+                    "v2 spaces API returned 404, falling back to v1 API. This may indicate an older Confluence Cloud instance."
                 )
                 # Fallback to v1
                 yield from self._paginate_spaces_for_endpoint(
@@ -354,9 +356,7 @@ class OnyxConfluence:
 
         if not first_space:
             raise RuntimeError(
-                f"No spaces found at {self._url}! "
-                "Check your credentials and wiki_base and make sure "
-                "is_cloud is set correctly."
+                f"No spaces found at {self._url}! Check your credentials and wiki_base and make sure is_cloud is set correctly."
             )
 
         logger.info("Confluence probe succeeded.")
@@ -459,10 +459,9 @@ class OnyxConfluence:
                         return attr(*args, **kwargs)
 
                 except HTTPError as e:
-                    delay_until = _handle_http_error(e, attempt)
+                    delay_until = _handle_http_error(e, attempt, MAX_RETRIES)
                     logger.warning(
-                        f"HTTPError in confluence call. "
-                        f"Retrying in {delay_until} seconds..."
+                        f"HTTPError in confluence call. Retrying in {delay_until} seconds..."
                     )
                     while time.monotonic() < delay_until:
                         # in the future, check a signal here to exit
@@ -544,8 +543,7 @@ class OnyxConfluence:
                 if not latest_results:
                     # no more results, break out of the loop
                     logger.info(
-                        f"No results found for call '{temp_url_suffix}'"
-                        "Stopping pagination."
+                        f"No results found for call '{temp_url_suffix}'Stopping pagination."
                     )
                     found_empty_page = True
                     break
@@ -574,7 +572,8 @@ class OnyxConfluence:
         if not limit:
             limit = _DEFAULT_PAGINATION_LIMIT
 
-        url_suffix = update_param_in_path(url_suffix, "limit", str(limit))
+        current_limit = limit
+        url_suffix = update_param_in_path(url_suffix, "limit", str(current_limit))
 
         while url_suffix:
             logger.debug(f"Making confluence call to {url_suffix}")
@@ -606,8 +605,7 @@ class OnyxConfluence:
                 # If that fails, raise the error
                 if _PROBLEMATIC_EXPANSIONS in url_suffix:
                     logger.warning(
-                        f"Replacing {_PROBLEMATIC_EXPANSIONS} with {_REPLACEMENT_EXPANSIONS}"
-                        " and trying again."
+                        f"Replacing {_PROBLEMATIC_EXPANSIONS} with {_REPLACEMENT_EXPANSIONS} and trying again."
                     )
                     url_suffix = url_suffix.replace(
                         _PROBLEMATIC_EXPANSIONS,
@@ -615,39 +613,60 @@ class OnyxConfluence:
                     )
                     continue
 
-                # If we fail due to a 500, try one by one.
-                # NOTE: this iterative approach only works for server, since cloud uses cursor-based
-                # pagination
-                if raw_response.status_code == 500 and not self._is_cloud:
-                    initial_start = get_start_param_from_url(url_suffix)
-                    if initial_start is None:
-                        # can't handle this if we don't have offset-based pagination
-                        raise
+                if raw_response.status_code in _SERVER_ERROR_CODES:
+                    # Try reducing the page size -- Confluence often times out
+                    # on large result sets (especially Cloud 504s).
+                    if current_limit > _MINIMUM_PAGINATION_LIMIT:
+                        old_limit = current_limit
+                        current_limit = max(
+                            current_limit // 2, _MINIMUM_PAGINATION_LIMIT
+                        )
+                        logger.warning(
+                            f"Confluence returned {raw_response.status_code}. "
+                            f"Reducing limit from {old_limit} to {current_limit} "
+                            f"and retrying."
+                        )
+                        url_suffix = update_param_in_path(
+                            url_suffix, "limit", str(current_limit)
+                        )
+                        continue
 
-                    # this will just yield the successful items from the batch
-                    new_url_suffix = yield from self._try_one_by_one_for_paginated_url(
-                        url_suffix,
-                        initial_start=initial_start,
-                        limit=limit,
-                    )
+                    # Limit reduction exhausted -- for Server, fall back to
+                    # one-by-one offset pagination as a last resort.
+                    if not self._is_cloud:
+                        initial_start = get_start_param_from_url(url_suffix)
+                        # this will just yield the successful items from the batch
+                        new_url_suffix = (
+                            yield from self._try_one_by_one_for_paginated_url(
+                                url_suffix,
+                                initial_start=initial_start,
+                                limit=current_limit,
+                            )
+                        )
+                        # this means we ran into an empty page
+                        if new_url_suffix is None:
+                            if next_page_callback:
+                                next_page_callback("")
+                            break
 
-                    # this means we ran into an empty page
-                    if new_url_suffix is None:
-                        if next_page_callback:
-                            next_page_callback("")
-                        break
+                        url_suffix = new_url_suffix
+                        continue
 
-                    url_suffix = new_url_suffix
-                    continue
-
-                else:
                     logger.exception(
-                        f"Error in confluence call to {url_suffix} \n"
-                        f"Raw Response Text: {raw_response.text} \n"
-                        f"Full Response: {raw_response.__dict__} \n"
-                        f"Error: {e} \n"
+                        f"Error in confluence call to {url_suffix} "
+                        f"after reducing limit to {current_limit}.\n"
+                        f"Raw Response Text: {raw_response.text}\n"
+                        f"Error: {e}\n"
                     )
                     raise
+
+                logger.exception(
+                    f"Error in confluence call to {url_suffix} \n"
+                    f"Raw Response Text: {raw_response.text} \n"
+                    f"Full Response: {raw_response.__dict__} \n"
+                    f"Error: {e} \n"
+                )
+                raise
 
             try:
                 next_response = raw_response.json()
@@ -686,6 +705,10 @@ class OnyxConfluence:
             old_url_suffix = url_suffix
             updated_start = get_start_param_from_url(old_url_suffix)
             url_suffix = cast(str, next_response.get("_links", {}).get("next", ""))
+            if url_suffix and current_limit != limit:
+                url_suffix = update_param_in_path(
+                    url_suffix, "limit", str(current_limit)
+                )
             for i, result in enumerate(results):
                 updated_start += 1
                 if url_suffix and next_page_callback and i == len(results) - 1:
@@ -711,8 +734,7 @@ class OnyxConfluence:
             # stop paginating.
             if url_suffix and not results:
                 logger.info(
-                    f"No results found for call '{old_url_suffix}' despite next link "
-                    "being present. Stopping pagination."
+                    f"No results found for call '{old_url_suffix}' despite next link being present. Stopping pagination."
                 )
                 break
 
@@ -901,13 +923,16 @@ class OnyxConfluence:
         space_key: str,
     ) -> list[dict[str, Any]]:
         """
-        This is a confluence server specific method that can be used to
+        This is a confluence server/data center specific method that can be used to
         fetch the permissions of a space.
-        This is better logging than calling the get_space_permissions method
-        because it returns a jsonrpc response.
-        TODO: Make this call these endpoints for newer confluence versions:
-        - /rest/api/space/{spaceKey}/permissions
-        - /rest/api/space/{spaceKey}/permissions/anonymous
+
+        NOTE: This uses the JSON-RPC API which is the ONLY way to get space permissions
+        on Confluence Server/Data Center. The REST API equivalent (expand=permissions)
+        is Cloud-only and not available on Data Center as of version 8.9.x.
+
+        If this fails with 401 Unauthorized, the customer needs to enable JSON-RPC:
+        Confluence Admin -> General Configuration -> Further Configuration
+        -> Enable "Remote API (XML-RPC & SOAP)"
         """
         url = "rpc/json-rpc/confluenceservice-v2"
         data = {
@@ -916,12 +941,22 @@ class OnyxConfluence:
             "id": 7,
             "params": [space_key],
         }
-        response = self.post(url, data=data)
+        try:
+            response = self.post(url, data=data)
+        except HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                raise HTTPError(
+                    "Unauthorized (401) when calling JSON-RPC API for space permissions. "
+                    "This is likely because the Remote API is disabled. "
+                    "To fix: Confluence Admin -> General Configuration -> Further Configuration "
+                    "-> Enable 'Remote API (XML-RPC & SOAP)'",
+                    response=e.response,
+                ) from e
+            raise
         logger.debug(f"jsonrpc response: {response}")
         if not response.get("result"):
             logger.warning(
-                f"No jsonrpc response for space permissions for space {space_key}"
-                f"\nResponse: {response}"
+                f"No jsonrpc response for space permissions for space {space_key}\nResponse: {response}"
             )
 
         return response.get("result", [])
@@ -936,7 +971,7 @@ class OnyxConfluence:
         :return: Returns the user details
         """
 
-        from atlassian.errors import ApiPermissionError  # type:ignore
+        from atlassian.errors import ApiPermissionError
 
         url = "rest/api/user/current"
         params = {}
@@ -961,14 +996,19 @@ def get_user_email_from_username__server(
         try:
             response = confluence_client.get_mobile_parameters(user_name)
             email = response.get("email")
-        except Exception:
-            logger.warning(f"failed to get confluence email for {user_name}")
+        except HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else "N/A"
+            logger.warning(
+                f"Failed to get confluence email for {user_name}: HTTP {status_code} - {e}"
+            )
             # For now, we'll just return None and log a warning. This means
             # we will keep retrying to get the email every group sync.
             email = None
-            # We may want to just return a string that indicates failure so we dont
-            # keep retrying
-            # email = f"FAILED TO GET CONFLUENCE EMAIL FOR {user_name}"
+        except Exception as e:
+            logger.warning(
+                f"Failed to get confluence email for {user_name}: {type(e).__name__} - {e}"
+            )
+            email = None
         _USER_EMAIL_CACHE[user_name] = email
     return _USER_EMAIL_CACHE[user_name]
 
@@ -1032,6 +1072,9 @@ def extract_text_from_confluence_html(
 
     _remove_macro_stylings(soup=soup)
 
+    for date_span in soup.findAll("span", {"class": "date-lozenger-container"}):
+        date_span.replaceWith(date_span.get_text())
+
     for user in soup.findAll("ri:user"):
         user_id = (
             user.attrs["ri:account-id"]
@@ -1040,7 +1083,7 @@ def extract_text_from_confluence_html(
         )
         if not user_id:
             logger.warning(
-                "ri:userkey not found in ri:user element. " f"Found attrs: {user.attrs}"
+                f"ri:userkey not found in ri:user element. Found attrs: {user.attrs}"
             )
             continue
         # Include @ sign for tagging, more clear for LLM

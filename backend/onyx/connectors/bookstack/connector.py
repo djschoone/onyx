@@ -2,6 +2,7 @@ import html
 import time
 from collections.abc import Callable
 from datetime import datetime
+from datetime import timezone
 from typing import Any
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
@@ -18,6 +19,7 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.file_processing.html_utils import parse_html_page_basic
 
@@ -47,7 +49,7 @@ class BookstackConnector(LoadConnector, PollConnector):
         start_ind: int,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
-    ) -> tuple[list[Document], int]:
+    ) -> tuple[list[Document | HierarchyNode], int]:
         params = {
             "count": str(batch_size),
             "offset": str(start_ind),
@@ -55,17 +57,19 @@ class BookstackConnector(LoadConnector, PollConnector):
         }
 
         if start:
-            params["filter[updated_at:gte]"] = datetime.utcfromtimestamp(
-                start
+            params["filter[updated_at:gte]"] = datetime.fromtimestamp(
+                start, tz=timezone.utc
             ).strftime("%Y-%m-%d")
 
         if end:
-            params["filter[updated_at:lte]"] = datetime.utcfromtimestamp(end).strftime(
-                "%Y-%m-%d"
-            )
+            params["filter[updated_at:lte]"] = datetime.fromtimestamp(
+                end, tz=timezone.utc
+            ).strftime("%Y-%m-%d")
 
         batch = bookstack_client.get(endpoint, params=params).get("data", [])
-        doc_batch = [transformer(bookstack_client, item) for item in batch]
+        doc_batch: list[Document | HierarchyNode] = [
+            transformer(bookstack_client, item) for item in batch
+        ]
 
         return doc_batch, len(batch)
 

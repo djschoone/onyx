@@ -1,6 +1,6 @@
 import React, { useEffect, forwardRef } from "react";
 import { createPortal } from "react-dom";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import { OptionsList } from "./OptionsList";
 import { ComboBoxOption } from "../types";
 
@@ -27,6 +27,10 @@ interface ComboBoxDropdownProps {
   allowCreate: boolean;
   /** Whether to show create option (pre-computed by parent) */
   showCreateOption: boolean;
+  /** Prefix shown before the typed value in the create option (e.g., "Use", "Add") */
+  createPrefix?: string;
+  /** Max height of the dropdown in CSS units. Defaults to "15rem". */
+  dropdownMaxHeight?: string;
 }
 
 /**
@@ -58,6 +62,8 @@ export const ComboBoxDropdown = forwardRef<
       inputValue,
       allowCreate,
       showCreateOption,
+      createPrefix,
+      dropdownMaxHeight,
     },
     ref
   ) => {
@@ -101,12 +107,14 @@ export const ComboBoxDropdown = forwardRef<
         role="listbox"
         aria-label={placeholder}
         className={cn(
-          "z-[10000] bg-background-neutral-00 border border-border-02 rounded-12 shadow-02 max-h-60 overflow-y-auto overflow-x-hidden p-1 pointer-events-auto touch-auto"
+          "z-[10000] bg-background-neutral-00 border border-border-02 rounded-12 shadow-02 overflow-y-auto overflow-x-hidden p-1 pointer-events-auto touch-auto",
+          !dropdownMaxHeight && "max-h-60"
         )}
         style={{
           ...floatingStyles,
           // Ensure the dropdown can scroll independently
           overscrollBehavior: "contain",
+          ...(dropdownMaxHeight ? { maxHeight: dropdownMaxHeight } : {}),
         }}
         onWheel={(e) => {
           // Prevent event from bubbling to prevent any parent scroll blocking
@@ -132,6 +140,7 @@ export const ComboBoxDropdown = forwardRef<
           inputValue={inputValue}
           allowCreate={allowCreate}
           showCreateOption={showCreateOption}
+          createPrefix={createPrefix}
         />
       </div>,
       document.body

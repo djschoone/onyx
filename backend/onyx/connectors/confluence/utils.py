@@ -22,6 +22,7 @@ from onyx.configs.app_configs import (
     CONFLUENCE_CONNECTOR_ATTACHMENT_CHAR_COUNT_THRESHOLD,
 )
 from onyx.configs.app_configs import CONFLUENCE_CONNECTOR_ATTACHMENT_SIZE_THRESHOLD
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import FileOrigin
 from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.file_processing.extract_file_text import get_file_ext
@@ -155,10 +156,7 @@ def process_attachment(
                 )
 
         logger.info(
-            f"Downloading attachment: "
-            f"title={attachment['title']} "
-            f"length={attachment_size} "
-            f"link={attachment_link}"
+            f"Downloading attachment: title={attachment['title']} length={attachment_size} link={attachment_link}"
         )
 
         # Download the attachment
@@ -213,7 +211,7 @@ def process_attachment(
 
 
 def _process_image_attachment(
-    confluence_client: "OnyxConfluence",
+    confluence_client: "OnyxConfluence",  # noqa: ARG001
     attachment: dict[str, Any],
     raw_bytes: bytes,
     media_type: str,
@@ -321,6 +319,7 @@ def confluence_refresh_tokens(
             "client_secret": client_secret,
             "refresh_token": refresh_token,
         },
+        timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
     try:
@@ -366,10 +365,9 @@ def handle_confluence_rate_limit(confluence_call: F) -> F:
                 # and applying our own retries in a more specific set of circumstances
                 return confluence_call(*args, **kwargs)
             except requests.HTTPError as e:
-                delay_until = _handle_http_error(e, attempt)
+                delay_until = _handle_http_error(e, attempt, MAX_RETRIES)
                 logger.warning(
-                    f"HTTPError in confluence call. "
-                    f"Retrying in {delay_until} seconds..."
+                    f"HTTPError in confluence call. Retrying in {delay_until} seconds..."
                 )
                 while time.monotonic() < delay_until:
                     # in the future, check a signal here to exit
@@ -388,7 +386,7 @@ def handle_confluence_rate_limit(confluence_call: F) -> F:
     return cast(F, wrapped_call)
 
 
-def _handle_http_error(e: requests.HTTPError, attempt: int) -> int:
+def _handle_http_error(e: requests.HTTPError, attempt: int, max_retries: int) -> int:
     MIN_DELAY = 2
     MAX_DELAY = 60
     STARTING_DELAY = 5
@@ -411,6 +409,17 @@ def _handle_http_error(e: requests.HTTPError, attempt: int) -> int:
             return FORBIDDEN_RETRY_DELAY
 
         raise e
+
+    if e.response.status_code >= 500:
+        if attempt >= max_retries - 1:
+            raise e
+
+        delay = min(STARTING_DELAY * (BACKOFF**attempt), MAX_DELAY)
+        logger.warning(
+            f"Server error {e.response.status_code}. "
+            f"Retrying in {delay} seconds (attempt {attempt + 1})..."
+        )
+        return math.ceil(time.monotonic() + delay)
 
     if (
         e.response.status_code != 429

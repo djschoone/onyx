@@ -6,5 +6,8 @@
 /web/STANDARDS.md @raunakab @Weves
 
 # Agent context files
-/CLAUDE.md.template @Weves
-/AGENTS.md.template @Weves
+/CLAUDE.md @Weves
+/AGENTS.md @Weves
+
+# Beta cherry-pick workflow owners
+/.github/workflows/post-merge-beta-cherry-pick.yml @justin-tahara @jmelahman

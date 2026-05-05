@@ -20,6 +20,7 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.connectors.zulip.schemas import GetMessagesResponse
 from onyx.connectors.zulip.schemas import Message
@@ -60,8 +61,7 @@ class ZulipConnector(LoadConnector, PollConnector):
 
             if not netloc:
                 raise ValueError(
-                    f"Invalid realm URL format: {realm_url}. "
-                    f"URL must include a valid domain name."
+                    f"Invalid realm URL format: {realm_url}. URL must include a valid domain name."
                 )
 
             # Always use HTTPS for security
@@ -81,9 +81,7 @@ class ZulipConnector(LoadConnector, PollConnector):
         # zuliprc file. This reverts them back to newlines.
         contents_spaces_to_newlines = contents.replace(" ", "\n")
         # create a temporary zuliprc file
-        tempdir = tempfile.tempdir
-        if tempdir is None:
-            raise Exception("Could not determine tempfile directory")
+        tempdir = tempfile.gettempdir()
         config_file = os.path.join(tempdir, f"zuliprc-{self.realm_name}")
         with open(config_file, "w") as f:
             f.write(contents_spaces_to_newlines)
@@ -191,14 +189,16 @@ class ZulipConnector(LoadConnector, PollConnector):
             anchor = str(message.id)
 
     def _poll_source(
-        self, start: SecondsSinceUnixEpoch | None, end: SecondsSinceUnixEpoch | None
+        self,
+        start: SecondsSinceUnixEpoch | None,
+        end: SecondsSinceUnixEpoch | None,  # noqa: ARG002
     ) -> GenerateDocumentsOutput:
         # Since Zulip doesn't support searching by timestamp,
         # we have to always start from the newest message
         # and go backwards.
         anchor = "newest"
 
-        docs = []
+        docs: list[Document | HierarchyNode] = []
         for doc in self._get_docs(anchor=anchor, start=start):
             docs.append(doc)
             if len(docs) == self.batch_size:

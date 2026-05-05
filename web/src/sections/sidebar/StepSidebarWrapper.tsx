@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import type { IconProps } from "@opal/types";
-import SidebarTab from "@/refresh-components/buttons/SidebarTab";
+import { SidebarTab } from "@opal/components";
 import SidebarWrapper from "@/sections/sidebar/SidebarWrapper";
 
 export interface StepSidebarProps {
@@ -19,11 +19,7 @@ export default function StepSidebar({
   return (
     <SidebarWrapper>
       <div className="px-2">
-        <SidebarTab
-          leftIcon={buttonIcon}
-          className="bg-background-tint-00"
-          href={buttonHref}
-        >
+        <SidebarTab icon={buttonIcon} href={buttonHref}>
           {buttonName}
         </SidebarTab>
       </div>

@@ -1,9 +1,15 @@
 import React from "react";
 import NumberInput from "./ConnectorInput/NumberInput";
 import { TextFormField } from "@/components/Field";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { SvgTrash } from "@opal/icons";
-export default function AdvancedFormPage() {
+interface AdvancedFormPageProps {
+  defaultPruneFreqHours?: number;
+}
+
+export default function AdvancedFormPage({
+  defaultPruneFreqHours = 600,
+}: AdvancedFormPageProps) {
   return (
     <div className="py-4 flex flex-col gap-y-6 rounded-lg max-w-2xl mx-auto">
       <h2 className="text-2xl font-bold mb-4 text-text-800">
@@ -14,7 +20,9 @@ export default function AdvancedFormPage() {
         description={`
           Checks all documents against the source to delete those that no longer exist.
           Note: This process checks every document, so be cautious when increasing frequency.
-          Default is 720 hours (30 days). Decimal hours are supported (e.g., 0.1 hours = 6 minutes).
+          Default is ${defaultPruneFreqHours} hours (${Math.round(
+            defaultPruneFreqHours / 24
+          )} days). Decimal hours are supported (e.g., 0.1 hours = 6 minutes).
           Enter 0 to disable pruning for this connector.
         `}
         label="Prune Frequency (hours)"
@@ -35,7 +43,7 @@ export default function AdvancedFormPage() {
         name="indexingStart"
       />
       <div className="mt-4 flex w-full mx-auto max-w-2xl justify-start">
-        <Button leftIcon={SvgTrash} danger type="submit">
+        <Button variant="danger" icon={SvgTrash} type="submit">
           Reset
         </Button>
       </div>

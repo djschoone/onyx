@@ -10,9 +10,7 @@ from simple_salesforce.bulk2 import SFBulk2Handler
 from simple_salesforce.bulk2 import SFBulk2Type
 from simple_salesforce.exceptions import SalesforceRefusedRequest
 
-from onyx.connectors.cross_connector_utils.rate_limit_wrapper import (
-    rate_limit_builder,
-)
+from onyx.connectors.cross_connector_utils.rate_limit_wrapper import rate_limit_builder
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.salesforce.utils import MODIFIED_FIELD
 from onyx.utils.logger import setup_logger
@@ -35,10 +33,7 @@ def _build_last_modified_time_filter_for_salesforce(
         return ""
     start_datetime = datetime.fromtimestamp(start, UTC)
     end_datetime = datetime.fromtimestamp(end, UTC)
-    return (
-        f" WHERE LastModifiedDate > {start_datetime.isoformat()} "
-        f"AND LastModifiedDate < {end_datetime.isoformat()}"
-    )
+    return f" WHERE LastModifiedDate > {start_datetime.isoformat()} AND LastModifiedDate < {end_datetime.isoformat()}"
 
 
 def _build_created_date_time_filter_for_salesforce(
@@ -48,10 +43,7 @@ def _build_created_date_time_filter_for_salesforce(
         return ""
     start_datetime = datetime.fromtimestamp(start, UTC)
     end_datetime = datetime.fromtimestamp(end, UTC)
-    return (
-        f" WHERE CreatedDate > {start_datetime.isoformat()} "
-        f"AND CreatedDate < {end_datetime.isoformat()}"
-    )
+    return f" WHERE CreatedDate > {start_datetime.isoformat()} AND CreatedDate < {end_datetime.isoformat()}"
 
 
 def _make_time_filter_for_sf_type(

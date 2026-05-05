@@ -3,9 +3,9 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
-import { CheckmarkIcon, TriangleAlertIcon } from "@/components/icons/icons";
+import { SvgCheck, SvgAlertTriangle } from "@opal/icons";
 import CardSection from "@/components/admin/CardSection";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 
 interface OAuthCallbackConfig {
   // UI customization
@@ -69,7 +69,7 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
     }, 1000);
 
     const timer = setTimeout(() => {
-      const target = redirectPath || config.defaultRedirectPath || "/chat";
+      const target = redirectPath || config.defaultRedirectPath || "/app";
       router.push(target as Route);
     }, delayMs);
 
@@ -86,6 +86,8 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
   ]);
 
   useEffect(() => {
+    const controller = new AbortController();
+
     const handleOAuthCallback = async () => {
       // Handle OAuth error from provider
       if (error) {
@@ -122,6 +124,7 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
             "Content-Type": "application/json",
           },
           credentials: "include",
+          signal: controller.signal,
         });
 
         if (!response.ok) {
@@ -159,12 +162,19 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
 
         setServiceName(result.serviceName || "");
         // Respect backend-provided redirect path (from state.return_path)
-        setRedirectPath(
+        // Sanitize to prevent open redirects (e.g. "//evil.com")
+        const rawPath =
           responseData.redirect_url ||
-            searchParams?.get("return_path") ||
-            config.defaultRedirectPath ||
-            "/chat"
-        );
+          searchParams?.get("return_path") ||
+          config.defaultRedirectPath ||
+          "/app";
+        const sanitizedPath =
+          rawPath.startsWith("http://") || rawPath.startsWith("https://")
+            ? "/app"
+            : "/" + rawPath.replace(/^\/+/, "");
+        const redirectUrl = new URL(sanitizedPath, window.location.origin);
+        redirectUrl.searchParams.set("message", "oauth_connected");
+        setRedirectPath(redirectUrl.pathname + redirectUrl.search);
         setStatusMessage(config.successMessage || "Success!");
 
         const successDetails = config.successDetailsTemplate
@@ -181,6 +191,7 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
         setIsError(false);
         setIsLoading(false);
       } catch (error) {
+        if (controller.signal.aborted) return;
         console.error("OAuth callback error:", error);
         setStatusMessage(config.errorMessage || "Something Went Wrong");
         setStatusDetails(
@@ -194,6 +205,7 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
     };
 
     handleOAuthCallback();
+    return () => controller.abort();
   }, [code, state, error, errorDescription, searchParams, config]);
 
   const getStatusIcon = () => {
@@ -204,7 +216,7 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
     }
     if (isSuccess) {
       return (
-        <CheckmarkIcon
+        <SvgCheck
           size={64}
           className="text-green-500 dark:text-green-400 mx-auto mb-4"
         />
@@ -212,7 +224,7 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
     }
     if (isError) {
       return (
-        <TriangleAlertIcon
+        <SvgAlertTriangle
           size={64}
           className="text-red-500 dark:text-red-400 mx-auto mb-4"
         />
@@ -257,10 +269,10 @@ export default function OAuthCallbackPage({ config }: OAuthCallbackPageProps) {
                   <Button
                     onClick={() => {
                       const target =
-                        redirectPath || config.defaultRedirectPath || "/chat";
+                        redirectPath || config.defaultRedirectPath || "/app";
                       router.push(target as Route);
                     }}
-                    className="w-full"
+                    width="full"
                   >
                     {config.backButtonText || "Back to Chat"}
                   </Button>

@@ -2,9 +2,9 @@
 
 import React from "react";
 import { useField } from "formik";
-import { cn } from "@/lib/utils";
-import SimpleTooltip from "@/refresh-components/SimpleTooltip";
-import Checkbox from "@/refresh-components/inputs/Checkbox";
+import { cn } from "@opal/utils";
+import { Tooltip } from "@opal/components";
+import { Checkbox } from "@opal/components";
 
 interface CheckboxFieldProps {
   name: string;
@@ -14,6 +14,7 @@ interface CheckboxFieldProps {
   size?: "sm" | "md" | "lg";
   tooltip?: string;
   onChange?: (checked: boolean) => void;
+  disabled?: boolean;
 }
 
 export const CheckboxField: React.FC<CheckboxFieldProps> = ({
@@ -24,6 +25,7 @@ export const CheckboxField: React.FC<CheckboxFieldProps> = ({
   size = "md",
   tooltip,
   labelClassName,
+  disabled,
   ...props
 }) => {
   const [field, , helpers] = useField<boolean>({ name, type: "checkbox" });
@@ -54,6 +56,7 @@ export const CheckboxField: React.FC<CheckboxFieldProps> = ({
           onChange?.(Boolean(checked));
         }}
         className={cn(sizeClasses[size])}
+        disabled={disabled}
         {...props}
       />
       <div className="flex flex-col">
@@ -82,9 +85,9 @@ export const CheckboxField: React.FC<CheckboxFieldProps> = ({
   );
 
   return (
-    <SimpleTooltip tooltip={tooltip} side="top" sideOffset={25}>
+    <Tooltip tooltip={tooltip} side="top" sideOffset={25}>
       {checkboxContent}
-    </SimpleTooltip>
+    </Tooltip>
   );
 };
 

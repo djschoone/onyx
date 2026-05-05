@@ -1,4 +1,4 @@
-FROM python:3.11.7-slim-bookworm
+FROM python:3.11-slim-bookworm@sha256:9c6f90801e6b68e772b7c0ca74260cbf7af9f320acec894e26fccdaccfbe3b47
 
 LABEL com.danswer.maintainer="founders@onyx.app"
 LABEL com.danswer.description="This image is the web/frontend container of Onyx which \
@@ -7,8 +7,12 @@ have a contract or agreement with DanswerAI, you are not permitted to use the En
 Edition features outside of personal development or testing purposes. Please reach out to \
 founders@onyx.app for more information. Please visit https://github.com/onyx-dot-app/onyx"
 
+# Build argument for Craft support (disabled by default)
+# Use --build-arg ENABLE_CRAFT=true to include Node.js and opencode CLI
+ARG ENABLE_CRAFT=false
+
 # DO_NOT_TRACK is used to disable telemetry for Unstructured
-ENV DANSWER_RUNNING_IN_DOCKER="true" \
+ENV ONYX_RUNNING_IN_DOCKER="true" \
     DO_NOT_TRACK="true" \
     PLAYWRIGHT_BROWSERS_PATH="/app/.cache/ms-playwright"
 
@@ -42,11 +46,31 @@ RUN apt-get update && \
         pkg-config \
         gcc \
         nano \
-        vim && \
+        vim \
+        # Install procps so kubernetes exec sessions can use ps aux for debugging
+        procps \
+        libjemalloc2 \
+        && \
     rm -rf /var/lib/apt/lists/* && \
     apt-get clean
 
+# Conditionally install Node.js 20 for Craft (required for Next.js)
+# Only installed when ENABLE_CRAFT=true
+RUN if [ "$ENABLE_CRAFT" = "true" ]; then \
+        echo "Installing Node.js 20 for Craft support..." && \
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+        apt-get install -y nodejs && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
+# Conditionally install opencode CLI for Craft agent functionality
+# Only installed when ENABLE_CRAFT=true
+# TODO: download a specific, versioned release of the opencode CLI
+RUN if [ "$ENABLE_CRAFT" = "true" ]; then \
+        echo "Installing opencode CLI for Craft support..." && \
+        curl -fsSL https://opencode.ai/install | bash; \
+    fi
+ENV PATH="/root/.opencode/bin:${PATH}"
 
 # Install Python dependencies
 # Remove py which is pulled in by retry, py is not needed and is a CVE
@@ -91,8 +115,8 @@ Tokenizer.from_pretrained('nomic-ai/nomic-embed-text-v1')"
 
 # Pre-downloading NLTK for setups with limited egress
 RUN python -c "import nltk; \
-nltk.download('stopwords', quiet=True); \
-nltk.download('punkt_tab', quiet=True);"
+    nltk.download('stopwords', quiet=True); \
+    nltk.download('punkt_tab', quiet=True);"
 # nltk.download('wordnet', quiet=True); introduce this back if lemmatization is needed
 
 # Pre-downloading tiktoken for setups with limited egress
@@ -114,12 +138,28 @@ COPY --chown=onyx:onyx ./alembic_tenants /app/alembic_tenants
 COPY --chown=onyx:onyx ./alembic.ini /app/alembic.ini
 COPY supervisord.conf /usr/etc/supervisord.conf
 COPY --chown=onyx:onyx ./static /app/static
+COPY --chown=onyx:onyx ./keys /app/keys
 
 # Escape hatch scripts
 COPY --chown=onyx:onyx ./scripts/debugging /app/scripts/debugging
 COPY --chown=onyx:onyx ./scripts/force_delete_connector_by_id.py /app/scripts/force_delete_connector_by_id.py
 COPY --chown=onyx:onyx ./scripts/supervisord_entrypoint.sh /app/scripts/supervisord_entrypoint.sh
-RUN chmod +x /app/scripts/supervisord_entrypoint.sh
+COPY --chown=onyx:onyx ./scripts/setup_craft_templates.sh /app/scripts/setup_craft_templates.sh
+COPY --chown=onyx:onyx ./scripts/reencrypt_secrets.py /app/scripts/reencrypt_secrets.py
+COPY --chown=onyx:onyx ./scripts/rotate_llm_provider_keys.py /app/scripts/rotate_llm_provider_keys.py
+RUN chmod +x /app/scripts/supervisord_entrypoint.sh /app/scripts/setup_craft_templates.sh
+
+# Run Craft template setup at build time when ENABLE_CRAFT=true
+# This pre-bakes demo data, Python venv, and npm dependencies into the image
+RUN if [ "$ENABLE_CRAFT" = "true" ]; then \
+        echo "Running Craft template setup at build time..." && \
+        ENABLE_CRAFT=true /app/scripts/setup_craft_templates.sh; \
+    fi
+
+# Set Craft template paths to the in-image locations
+# These match the paths where setup_craft_templates.sh creates the templates
+ENV OUTPUTS_TEMPLATE_PATH=/app/onyx/server/features/build/sandbox/kubernetes/docker/templates/outputs
+ENV VENV_TEMPLATE_PATH=/app/onyx/server/features/build/sandbox/kubernetes/docker/templates/venv
 
 # Put logo in assets
 COPY --chown=onyx:onyx ./assets /app/assets
@@ -129,6 +169,13 @@ ENV PYTHONPATH=/app
 # Default ONYX_VERSION, typically overriden during builds by GitHub Actions.
 ARG ONYX_VERSION=0.0.0-dev
 ENV ONYX_VERSION=${ONYX_VERSION}
+
+# Use jemalloc instead of glibc malloc to reduce memory fragmentation
+# in long-running Python processes (API server, Celery workers).
+# The soname is architecture-independent; the dynamic linker resolves
+# the correct path from standard library directories.
+# Placed after all RUN steps so build-time processes are unaffected.
+ENV LD_PRELOAD=libjemalloc.so.2
 
 # Default command which does nothing
 # This container is used by api server and background which specify their own CMD

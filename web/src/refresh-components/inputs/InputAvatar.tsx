@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import * as AvatarPrimitive from "@radix-ui/react-avatar";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import { wrapperClasses } from "@/refresh-components/inputs/styles";
 
 const InputAvatar = React.forwardRef<
@@ -13,7 +13,7 @@ const InputAvatar = React.forwardRef<
     ref={ref}
     className={cn(
       "relative flex h-10 w-10 shrink-0 overflow-hidden rounded-full",
-      wrapperClasses.main,
+      wrapperClasses.primary,
       className
     )}
     {...props}

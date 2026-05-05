@@ -3,7 +3,7 @@ import { FiCalendar, FiChevronDown, FiXCircle } from "react-icons/fi";
 import { CustomDropdown } from "../Dropdown";
 import { timeRangeValues } from "@/app/config/timeRange";
 import { TimeRangeSelector } from "@/components/filters/TimeRangeSelector";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 
 export function SearchDateRangeSelector({
   value,
@@ -23,7 +23,7 @@ export function SearchDateRangeSelector({
           <TimeRangeSelector
             value={value}
             className={cn(
-              "border border-border bg-background rounded-lg flex flex-col w-64 max-h-96 overflow-y-auto flex overscroll-contain",
+              "border border-border bg-background rounded-lg flex flex-col w-64 max-h-96 overflow-y-auto overscroll-contain",
               className
             )}
             timeRangeValues={timeRangeValues}
@@ -33,15 +33,15 @@ export function SearchDateRangeSelector({
       >
         <div
           className={`
-            flex 
-            text-sm  
+            flex
+            text-sm
             px-3
             line-clamp-1
-            py-1.5 
-            rounded-lg 
-            border 
-            border-border 
-            cursor-pointer 
+            py-1.5
+            rounded-lg
+            border
+            border-border
+            cursor-pointer
             hover:bg-accent-background-hovered`}
         >
           <FiCalendar className="flex-none my-auto mr-2" />{" "}

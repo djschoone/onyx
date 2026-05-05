@@ -1,8 +1,8 @@
 "use client";
-import { AdminPageTitle } from "@/components/admin/Title";
+import * as SettingsLayouts from "@/layouts/settings-layouts";
 import { SourceCategory, SourceMetadata } from "@/lib/search/interfaces";
 import { listSourceMetadata } from "@/lib/sources";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import {
   useCallback,
   useContext,
@@ -12,12 +12,7 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip } from "@opal/components";
 import { useFederatedConnectors } from "@/lib/hooks";
 import {
   FederatedConnectorDetail,
@@ -28,11 +23,14 @@ import useSWR from "swr";
 import { errorHandlingFetcher } from "@/lib/fetcher";
 import { buildSimilarCredentialInfoURL } from "@/app/admin/connector/[ccPairId]/lib";
 import { Credential } from "@/lib/connectors/credentials";
-import { SettingsContext } from "@/components/settings/SettingsProvider";
+import { SettingsContext } from "@/providers/SettingsProvider";
 import SourceTile from "@/components/SourceTile";
 import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
 import Text from "@/refresh-components/texts/Text";
-import { SvgUploadCloud } from "@opal/icons";
+import { ADMIN_ROUTES } from "@/lib/admin-routes";
+
+const route = ADMIN_ROUTES.ADD_CONNECTOR;
+
 function SourceTileTooltipWrapper({
   sourceMetadata,
   preSelect,
@@ -65,26 +63,18 @@ function SourceTileTooltipWrapper({
 
   // Determine the URL to navigate to
   const navigationUrl = useMemo(() => {
-    // Special logic for Slack: if there are existing credentials, use the old flow
-    if (isSlackTile && hasExistingSlackCredentials) {
-      return "/admin/connectors/slack";
-    }
-
-    // Otherwise, use the existing logic
+    // If there's an existing federated connector, route to edit it
     if (existingFederatedConnector) {
       return `/admin/federated/${existingFederatedConnector.id}`;
     }
-    return sourceMetadata.adminUrl;
-  }, [
-    isSlackTile,
-    hasExistingSlackCredentials,
-    existingFederatedConnector,
-    sourceMetadata.adminUrl,
-  ]);
 
-  // Compute whether to hide the tooltip based on the provided condition
+    // For all other sources (including Slack), use the regular admin URL
+    return sourceMetadata.adminUrl;
+  }, [existingFederatedConnector, sourceMetadata]);
+
+  // Compute whether to hide the tooltip
   const shouldHideTooltip =
-    !(existingFederatedConnector && !hasExistingSlackCredentials) &&
+    !existingFederatedConnector &&
     !hasExistingSlackCredentials &&
     !sourceMetadata.federated;
 
@@ -101,44 +91,31 @@ function SourceTileTooltipWrapper({
   }
 
   return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <div>
-            <SourceTile
-              sourceMetadata={sourceMetadata}
-              preSelect={preSelect}
-              navigationUrl={navigationUrl}
-              hasExistingSlackCredentials={!!hasExistingSlackCredentials}
-            />
-          </div>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-sm">
-          {existingFederatedConnector && !hasExistingSlackCredentials ? (
-            <Text as="p" textLight05 secondaryBody>
-              <strong>Federated connector already configured.</strong> Click to
-              edit the existing connector.
-            </Text>
-          ) : hasExistingSlackCredentials ? (
-            <Text as="p" textLight05 secondaryBody>
-              <strong>Existing Slack credentials found.</strong> Click to manage
-              the traditional Slack connector.
-            </Text>
-          ) : sourceMetadata.federated ? (
-            <Text as="p" textLight05 secondaryBody>
-              {sourceMetadata.federatedTooltip ? (
-                sourceMetadata.federatedTooltip
-              ) : (
-                <>
-                  <strong>Federated Search.</strong> This will result in greater
-                  latency and lower search quality.
-                </>
-              )}
-            </Text>
-          ) : null}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <Tooltip
+      side="top"
+      tooltip={
+        existingFederatedConnector ? (
+          <Text as="p" textLight05 secondaryBody>
+            <strong>Federated connector already configured.</strong> Click to
+            edit the existing connector.
+          </Text>
+        ) : hasExistingSlackCredentials ? (
+          <Text as="p" textLight05 secondaryBody>
+            <strong>Existing Slack credentials found.</strong> Click to manage
+            your Slack connector.
+          </Text>
+        ) : undefined
+      }
+    >
+      <div>
+        <SourceTile
+          sourceMetadata={sourceMetadata}
+          preSelect={preSelect}
+          navigationUrl={navigationUrl}
+          hasExistingSlackCredentials={!!hasExistingSlackCredentials}
+        />
+      </div>
+    </Tooltip>
   );
 }
 
@@ -267,61 +244,35 @@ export default function Page() {
   };
 
   return (
-    <div className="container">
-      <AdminPageTitle
-        icon={SvgUploadCloud}
-        title="Add Connector"
-        farRightElement={
-          <Button href="/admin/indexing/status" primary>
-            See Connectors
-          </Button>
+    <SettingsLayouts.Root width="full">
+      <SettingsLayouts.Header
+        icon={route.icon}
+        title={route.title}
+        rightChildren={
+          <Button href="/admin/indexing/status">See Connectors</Button>
         }
+        divider
       />
+      <SettingsLayouts.Body>
+        <InputTypeIn
+          type="text"
+          placeholder="Search Connectors"
+          ref={searchInputRef}
+          value={rawSearchTerm} // keep the input bound to immediate state
+          onChange={(event) => setSearchTerm(event.target.value)}
+          onKeyDown={handleKeyPress}
+          className="w-96 flex-none"
+        />
 
-      <InputTypeIn
-        type="text"
-        placeholder="Search Connectors"
-        ref={searchInputRef}
-        value={rawSearchTerm} // keep the input bound to immediate state
-        onChange={(event) => setSearchTerm(event.target.value)}
-        onKeyDown={handleKeyPress}
-        className="w-96"
-      />
-
-      {dedupedPopular.length > 0 && (
-        <div className="pt-8">
-          <Text as="p" headingH3>
-            Popular
-          </Text>
-          <div className="flex flex-wrap gap-4 p-4">
-            {dedupedPopular.map((source) => (
-              <SourceTileTooltipWrapper
-                preSelect={false}
-                key={source.internalName}
-                sourceMetadata={source}
-                federatedConnectors={federatedConnectors}
-                slackCredentials={slackCredentials}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {Object.entries(categorizedSources)
-        .filter(([_, sources]) => sources.length > 0)
-        .map(([category, sources], categoryInd) => (
-          <div key={category} className="pt-8">
+        {dedupedPopular.length > 0 && (
+          <div className="pt-8">
             <Text as="p" headingH3>
-              {category}
+              Popular
             </Text>
             <div className="flex flex-wrap gap-4 p-4">
-              {sources.map((source, sourceInd) => (
+              {dedupedPopular.map((source) => (
                 <SourceTileTooltipWrapper
-                  preSelect={
-                    (searchTerm?.length ?? 0) > 0 &&
-                    categoryInd == 0 &&
-                    sourceInd == 0
-                  }
+                  preSelect={false}
                   key={source.internalName}
                   sourceMetadata={source}
                   federatedConnectors={federatedConnectors}
@@ -330,7 +281,33 @@ export default function Page() {
               ))}
             </div>
           </div>
-        ))}
-    </div>
+        )}
+
+        {Object.entries(categorizedSources)
+          .filter(([_, sources]) => sources.length > 0)
+          .map(([category, sources], categoryInd) => (
+            <div key={category} className="pt-8">
+              <Text as="p" headingH3>
+                {category}
+              </Text>
+              <div className="flex flex-wrap gap-4 p-4">
+                {sources.map((source, sourceInd) => (
+                  <SourceTileTooltipWrapper
+                    preSelect={
+                      (searchTerm?.length ?? 0) > 0 &&
+                      categoryInd == 0 &&
+                      sourceInd == 0
+                    }
+                    key={source.internalName}
+                    sourceMetadata={source}
+                    federatedConnectors={federatedConnectors}
+                    slackCredentials={slackCredentials}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+      </SettingsLayouts.Body>
+    </SettingsLayouts.Root>
   );
 }

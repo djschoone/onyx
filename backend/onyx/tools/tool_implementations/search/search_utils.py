@@ -15,9 +15,7 @@ from onyx.document_index.vespa.shared_utils.utils import (
 from onyx.llm.interfaces import LLM
 from onyx.prompts.prompt_utils import clean_up_source
 from onyx.secondary_llm_flows.document_filter import classify_section_relevance
-from onyx.tools.tool_implementations.search.constants import (
-    FULL_DOC_NUM_CHUNKS_AROUND,
-)
+from onyx.tools.tool_implementations.search.constants import FULL_DOC_NUM_CHUNKS_AROUND
 from onyx.tools.tool_implementations.search.constants import RRF_K_VALUE
 from onyx.utils.logger import setup_logger
 
@@ -70,8 +68,7 @@ def weighted_reciprocal_rank_fusion(
     """
     if len(ranked_results) != len(weights):
         raise ValueError(
-            f"Number of ranked results ({len(ranked_results)}) must match "
-            f"number of weights ({len(weights)})"
+            f"Number of ranked results ({len(ranked_results)}) must match number of weights ({len(weights)})"
         )
 
     # Track RRF scores for each unique item (identified by ID)

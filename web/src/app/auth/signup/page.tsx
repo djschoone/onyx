@@ -1,4 +1,3 @@
-import { HealthCheckBanner } from "@/components/health/healthcheck";
 import { User } from "@/lib/types";
 import {
   getCurrentUserSS,
@@ -13,7 +12,7 @@ import AuthFlowContainer from "@/components/auth/AuthFlowContainer";
 import ReferralSourceSelector from "./ReferralSourceSelector";
 import AuthErrorDisplay from "@/components/auth/AuthErrorDisplay";
 import Text from "@/refresh-components/texts/Text";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import { AuthType } from "@/lib/constants";
 
 const Page = async (props: {
@@ -42,15 +41,10 @@ const Page = async (props: {
     console.log(`Some fetch failed for the login page - ${e}`);
   }
 
-  // simply take the user to the home page if Auth is disabled
-  if (authTypeMetadata?.authType === AuthType.DISABLED) {
-    return redirect("/chat");
-  }
-
   // if user is already logged in, take them to the main app page
   if (currentUser && currentUser.is_active && !currentUser.is_anonymous_user) {
     if (!authTypeMetadata?.requiresVerification || currentUser.is_verified) {
-      return redirect("/chat");
+      return redirect("/app");
     }
     return redirect("/auth/waiting-on-verification");
   }
@@ -58,7 +52,7 @@ const Page = async (props: {
 
   // only enable this page if basic login is enabled
   if (authTypeMetadata?.authType !== AuthType.BASIC && !cloud) {
-    return redirect("/chat");
+    return redirect("/app");
   }
 
   let authUrl: string | null = null;
@@ -68,7 +62,6 @@ const Page = async (props: {
 
   return (
     <AuthFlowContainer authState="signup">
-      <HealthCheckBanner />
       <AuthErrorDisplay searchParams={searchParams} />
 
       <>

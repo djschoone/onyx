@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
-import Button from "@/refresh-components/buttons/Button";
-import IconButton from "@/refresh-components/buttons/IconButton";
+import { Button } from "@opal/components";
 import {
   Table,
   TableBody,
@@ -11,12 +10,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import Checkbox from "@/refresh-components/inputs/Checkbox";
+import { Checkbox } from "@opal/components";
 import {
   updateConnectorFiles,
   type ConnectorFileInfo,
 } from "@/lib/fileConnector";
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import useSWR from "swr";
 import { errorHandlingFetcher } from "@/lib/fetcher";
 import { ThreeDotsLoader } from "@/components/Loading";
@@ -37,11 +36,10 @@ interface InlineFileManagementProps {
   onRefresh: () => void;
 }
 
-export function InlineFileManagement({
+export default function InlineFileManagement({
   connectorId,
   onRefresh,
 }: InlineFileManagementProps) {
-  const { setPopup } = usePopup();
   const [isEditing, setIsEditing] = useState(false);
   const [selectedFilesToRemove, setSelectedFilesToRemove] = useState<
     Set<string>
@@ -98,11 +96,9 @@ export function InlineFileManagement({
     ).length;
 
     if (remainingFiles === 0 && filesToAdd.length === 0) {
-      setPopup({
-        message:
-          "Cannot remove all files from a connector. Delete the connector if this is desired.",
-        type: "error",
-      });
+      toast.error(
+        "Cannot remove all files from a connector. Delete the connector if this is desired."
+      );
       return;
     }
 
@@ -120,12 +116,10 @@ export function InlineFileManagement({
         filesToAdd
       );
 
-      setPopup({
-        message:
-          "Files updated successfully! Document index is being updated in the background. " +
-          "New files are being indexed and removed files will be pruned from the search results.",
-        type: "success",
-      });
+      toast.success(
+        "Files updated successfully! Document index is being updated in the background. " +
+          "New files are being indexed and removed files will be pruned from the search results."
+      );
 
       // Reset editing state
       setIsEditing(false);
@@ -136,11 +130,9 @@ export function InlineFileManagement({
       refreshFiles();
       onRefresh();
     } catch (error) {
-      setPopup({
-        message:
-          error instanceof Error ? error.message : "Failed to update files",
-        type: "error",
-      });
+      toast.error(
+        error instanceof Error ? error.message : "Failed to update files"
+      );
     } finally {
       setIsSaving(false);
     }
@@ -183,30 +175,29 @@ export function InlineFileManagement({
         <div className="flex gap-2">
           {!isEditing ? (
             <Button
+              prominence="secondary"
               onClick={() => setIsEditing(true)}
-              secondary
-              leftIcon={SvgEdit}
+              icon={SvgEdit}
             >
               Edit
             </Button>
           ) : (
             <>
               <Button
-                onClick={handleCancel}
-                secondary
-                leftIcon={SvgX}
                 disabled={isSaving}
+                prominence="secondary"
+                onClick={handleCancel}
+                icon={SvgX}
               >
                 Cancel
               </Button>
               <Button
-                onClick={handleSaveClick}
-                primary
-                leftIcon={SvgCheck}
                 disabled={
                   isSaving ||
                   (selectedFilesToRemove.size === 0 && filesToAdd.length === 0)
                 }
+                onClick={handleSaveClick}
+                icon={SvgCheck}
               >
                 {isSaving ? "Saving..." : "Save Changes"}
               </Button>
@@ -302,10 +293,11 @@ export function InlineFileManagement({
                   >
                     {isEditing && (
                       <TableCell>
-                        <IconButton
+                        <Button
                           icon={SvgX}
-                          danger
-                          internal
+                          variant="danger"
+                          prominence="tertiary"
+                          size="sm"
                           onClick={() => handleRemoveNewFile(index)}
                           tooltip="Remove file"
                           title="Remove file"
@@ -341,10 +333,10 @@ export function InlineFileManagement({
             id={`file-upload-${connectorId}`}
           />
           <Button
-            onClick={() => fileInputRef.current?.click()}
-            secondary
-            leftIcon={SvgPlusCircle}
             disabled={isSaving}
+            prominence="secondary"
+            onClick={() => fileInputRef.current?.click()}
+            icon={SvgPlusCircle}
           >
             Add Files
           </Button>
@@ -353,14 +345,14 @@ export function InlineFileManagement({
 
       {/* Confirmation Modal */}
       <Modal open={showSaveConfirm} onOpenChange={setShowSaveConfirm}>
-        <Modal.Content mini>
+        <Modal.Content width="sm">
           <Modal.Header
             icon={SvgFolderPlus}
             title="Confirm File Changes"
             description="When you save these changes, the following will happen:"
           />
 
-          <Modal.Body className="px-6 space-y-3">
+          <Modal.Body>
             {selectedFilesToRemove.size > 0 && (
               <div className="p-3 bg-red-50 dark:bg-red-900/10 rounded-md">
                 <Text
@@ -402,15 +394,15 @@ export function InlineFileManagement({
             )}
           </Modal.Body>
 
-          <Modal.Footer className="p-6 pt-4">
+          <Modal.Footer>
             <Button
-              onClick={() => setShowSaveConfirm(false)}
-              secondary
               disabled={isSaving}
+              prominence="secondary"
+              onClick={() => setShowSaveConfirm(false)}
             >
               Cancel
             </Button>
-            <Button onClick={handleConfirmSave} primary disabled={isSaving}>
+            <Button disabled={isSaving} onClick={handleConfirmSave}>
               {isSaving ? "Saving..." : "Confirm & Save"}
             </Button>
           </Modal.Footer>

@@ -1,5 +1,6 @@
 import csv
 import json
+import queue
 import uuid
 from io import BytesIO
 from io import StringIO
@@ -11,11 +12,12 @@ import requests
 from requests import JSONDecodeError
 
 from onyx.chat.emitter import Emitter
-from onyx.chat.emitter import get_default_emitter
 from onyx.configs.constants import FileOrigin
 from onyx.file_store.file_store import get_default_file_store
 from onyx.server.query_and_chat.placement import Placement
+from onyx.server.query_and_chat.streaming_models import CustomToolArgs
 from onyx.server.query_and_chat.streaming_models import CustomToolDelta
+from onyx.server.query_and_chat.streaming_models import CustomToolErrorInfo
 from onyx.server.query_and_chat.streaming_models import CustomToolStart
 from onyx.server.query_and_chat.streaming_models import Packet
 from onyx.tools.interface import Tool
@@ -24,7 +26,10 @@ from onyx.tools.models import CustomToolCallSummary
 from onyx.tools.models import CustomToolUserFileSnapshot
 from onyx.tools.models import DynamicSchemaInfo
 from onyx.tools.models import MESSAGE_ID_PLACEHOLDER
+from onyx.tools.models import ToolCallException
 from onyx.tools.models import ToolResponse
+from onyx.tools.models import USER_EMAIL_PLACEHOLDER
+from onyx.tools.models import USER_ID_PLACEHOLDER
 from onyx.tools.tool_implementations.custom.openapi_parsing import MethodSpec
 from onyx.tools.tool_implementations.custom.openapi_parsing import (
     openapi_to_method_specs,
@@ -138,25 +143,31 @@ class CustomTool(Tool[None]):
         self.emitter.emit(
             Packet(
                 placement=placement,
-                obj=CustomToolStart(tool_name=self._name),
+                obj=CustomToolStart(tool_name=self._name, tool_id=self._id),
             )
         )
 
     def run(
         self,
         placement: Placement,
-        override_kwargs: None = None,
+        override_kwargs: None = None,  # noqa: ARG002
         **llm_kwargs: Any,
     ) -> ToolResponse:
-        request_body = llm_kwargs.get(REQUEST_BODY)
-
+        # Build path params
         path_params = {}
-
         for path_param_schema in self._method_spec.get_path_param_schemas():
-            path_params[path_param_schema["name"]] = llm_kwargs[
-                path_param_schema["name"]
-            ]
+            param_name = path_param_schema["name"]
+            if param_name not in llm_kwargs:
+                raise ToolCallException(
+                    message=f"Missing required path parameter '{param_name}' in {self._name} tool call",
+                    llm_facing_message=(
+                        f"The {self._name} tool requires the '{param_name}' path parameter. "
+                        f"Please provide it in the tool call arguments."
+                    ),
+                )
+            path_params[param_name] = llm_kwargs[param_name]
 
+        # Build query params
         query_params = {}
         for query_param_schema in self._method_spec.get_query_param_schemas():
             if query_param_schema["name"] in llm_kwargs:
@@ -164,6 +175,20 @@ class CustomTool(Tool[None]):
                     query_param_schema["name"]
                 ]
 
+        # Emit args packet (path + query params only, no request body)
+        tool_args = {**path_params, **query_params}
+        if tool_args:
+            self.emitter.emit(
+                Packet(
+                    placement=placement,
+                    obj=CustomToolArgs(
+                        tool_name=self._name,
+                        tool_args=tool_args,
+                    ),
+                )
+            )
+
+        request_body = llm_kwargs.get(REQUEST_BODY)
         url = self._method_spec.build_url(self._base_url, path_params, query_params)
         method = self._method_spec.method
 
@@ -171,6 +196,18 @@ class CustomTool(Tool[None]):
             method, url, json=request_body, headers=self.headers
         )
         content_type = response.headers.get("Content-Type", "")
+
+        # Detect HTTP errors — only 401/403 are flagged as auth errors
+        error_info: CustomToolErrorInfo | None = None
+        if response.status_code in (401, 403):
+            error_info = CustomToolErrorInfo(
+                is_auth_error=True,
+                status_code=response.status_code,
+                message=f"{self._name} action failed because of authentication error",
+            )
+            logger.warning(
+                f"Auth error from custom tool '{self._name}': HTTP {response.status_code}"
+            )
 
         tool_result: Any
         response_type: str
@@ -214,9 +251,11 @@ class CustomTool(Tool[None]):
                 placement=placement,
                 obj=CustomToolDelta(
                     tool_name=self._name,
+                    tool_id=self._id,
                     response_type=response_type,
                     data=data,
                     file_ids=file_ids,
+                    error=error_info,
                 ),
             )
         )
@@ -228,6 +267,7 @@ class CustomTool(Tool[None]):
                 tool_name=self._name,
                 response_type=response_type,
                 tool_result=tool_result,
+                error=error_info,
             ),
             llm_facing_response=llm_facing_response,
         )
@@ -241,12 +281,30 @@ def build_custom_tools_from_openapi_schema_and_headers(
     dynamic_schema_info: DynamicSchemaInfo | None = None,
     user_oauth_token: str | None = None,
 ) -> list[CustomTool]:
+    """Build CustomTool instances from an OpenAPI schema.
+
+    Placeholder substitution: when ``dynamic_schema_info`` is provided, the
+    JSON-serialized schema is scanned for the following literal strings and
+    each is replaced with the corresponding per-request value before the tool
+    is built:
+
+      - ``CHAT_SESSION_ID``  -> current chat session UUID
+      - ``MESSAGE_ID``       -> current chat message id
+      - ``USER_ID``          -> current user UUID (skipped for anonymous users)
+      - ``USER_EMAIL``       -> current user email (skipped for anonymous users)
+
+    Placeholders whose value is ``None`` (e.g. an anonymous user's identity)
+    are left untouched in the schema rather than substituted with an empty
+    string. Substitution only happens inside the OpenAPI schema; static
+    ``custom_headers`` are not templated.
+    """
     if dynamic_schema_info:
-        # Process dynamic schema information
         schema_str = json.dumps(openapi_schema)
         placeholders = {
             CHAT_SESSION_ID_PLACEHOLDER: dynamic_schema_info.chat_session_id,
             MESSAGE_ID_PLACEHOLDER: dynamic_schema_info.message_id,
+            USER_ID_PLACEHOLDER: dynamic_schema_info.user_id,
+            USER_EMAIL_PLACEHOLDER: dynamic_schema_info.user_email,
         }
 
         for placeholder, value in placeholders.items():
@@ -258,9 +316,9 @@ def build_custom_tools_from_openapi_schema_and_headers(
     url = openapi_to_url(openapi_schema)
     method_specs = openapi_to_method_specs(openapi_schema)
 
-    # Use default emitter if none provided
+    # Use a discard emitter if none provided (packets go nowhere)
     if emitter is None:
-        emitter = get_default_emitter()
+        emitter = Emitter(merged_queue=queue.Queue())
 
     return [
         CustomTool(
@@ -329,7 +387,7 @@ if __name__ == "__main__":
     tools = build_custom_tools_from_openapi_schema_and_headers(
         tool_id=0,  # dummy tool id
         openapi_schema=openapi_schema,
-        emitter=get_default_emitter(),
+        emitter=Emitter(merged_queue=queue.Queue()),
         dynamic_schema_info=None,
     )
 
@@ -340,7 +398,9 @@ if __name__ == "__main__":
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Can you fetch assistant with ID 10"},
         ],
-        tools=[tool.tool_definition() for tool in tools],  # type: ignore
+        tools=[  # ty: ignore[invalid-argument-type]
+            tool.tool_definition() for tool in tools
+        ],
     )
     choice = response.choices[0]
     if choice.message.tool_calls:

@@ -7,9 +7,6 @@ from pydantic import BaseModel
 from pydantic import Field
 from sqlalchemy.orm import Session
 
-from onyx.chat.models import PersonaOverrideConfig
-from onyx.chat.models import PromptOverrideConfig
-from onyx.chat.models import ToolConfig
 from onyx.db.tools import get_builtin_tool
 from onyx.llm.override_models import LLMOverride
 from onyx.server.query_and_chat.streaming_models import CitationInfo
@@ -34,6 +31,16 @@ class EvalTimings(BaseModel):
     stream_processing_ms: float | None = None  # Time to process the stream
 
 
+class ChatFullEvalResult(BaseModel):
+    """Raw eval components from ChatFullResponse (before tool assertions)."""
+
+    answer: str
+    tools_called: list[str]
+    tool_call_details: list[dict[str, Any]]
+    citations: list[CitationInfo]
+    timings: EvalTimings
+
+
 class EvalToolResult(BaseModel):
     """Result of a single eval with tool call information."""
 
@@ -46,17 +53,39 @@ class EvalToolResult(BaseModel):
     timings: EvalTimings | None = None  # Timing information for the eval
 
 
+class EvalMessage(BaseModel):
+    """Single message in a multi-turn evaluation conversation."""
+
+    message: str  # The message text to send
+    expected_tools: list[str] = Field(
+        default_factory=list
+    )  # Expected tools for this turn
+    require_all_tools: bool = False  # If True, ALL expected tools must be called
+    # Per-message model configuration overrides
+    model: str | None = None
+    model_provider: str | None = None
+    temperature: float | None = None
+    force_tools: list[str] = Field(default_factory=list)  # Tools to force for this turn
+
+
+class MultiTurnEvalResult(BaseModel):
+    """Result of a multi-turn evaluation containing per-message results."""
+
+    turn_results: list[EvalToolResult]  # Results for each turn/message
+    all_passed: bool  # True if all turn assertions passed
+    pass_count: int  # Number of turns that passed
+    fail_count: int  # Number of turns that failed
+    total_turns: int  # Total number of turns
+
+
 class EvalConfiguration(BaseModel):
-    builtin_tool_types: list[str] = Field(default_factory=list)
-    persona_override_config: PersonaOverrideConfig | None = None
     llm: LLMOverride = Field(default_factory=LLMOverride)
-    search_permissions_email: str | None = None
+    search_permissions_email: str
     allowed_tool_ids: list[int]
 
 
 class EvalConfigurationOptions(BaseModel):
     builtin_tool_types: list[str] = list(BUILT_IN_TOOL_MAP.keys())
-    persona_override_config: PersonaOverrideConfig | None = None
     llm: LLMOverride = LLMOverride(
         model_provider=None,
         model_version="gpt-4o",
@@ -65,28 +94,13 @@ class EvalConfigurationOptions(BaseModel):
     search_permissions_email: str
     dataset_name: str
     no_send_logs: bool = False
+    # Optional override for Braintrust project (defaults to BRAINTRUST_PROJECT env var)
+    braintrust_project: str | None = None
+    # Optional experiment name for the eval run (shows in Braintrust UI)
+    experiment_name: str | None = None
 
     def get_configuration(self, db_session: Session) -> EvalConfiguration:
-        persona_override_config = self.persona_override_config or PersonaOverrideConfig(
-            name="Eval",
-            description="A persona for evaluation",
-            tools=[
-                ToolConfig(id=get_builtin_tool(db_session, BUILT_IN_TOOL_MAP[tool]).id)
-                for tool in self.builtin_tool_types
-            ],
-            prompts=[
-                PromptOverrideConfig(
-                    name="Default",
-                    description="Default prompt for evaluation",
-                    system_prompt="You are a helpful assistant.",
-                    task_prompt="",
-                    datetime_aware=True,
-                )
-            ],
-        )
-
         return EvalConfiguration(
-            persona_override_config=persona_override_config,
             llm=self.llm,
             search_permissions_email=self.search_permissions_email,
             allowed_tool_ids=[
@@ -108,5 +122,6 @@ class EvalProvider(ABC):
         configuration: EvalConfigurationOptions,
         data: list[dict[str, Any]] | None = None,
         remote_dataset_name: str | None = None,
+        multi_turn_task: "Callable[[dict[str, Any]], MultiTurnEvalResult] | None" = None,
     ) -> EvalationAck:
         pass

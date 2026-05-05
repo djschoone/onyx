@@ -54,8 +54,8 @@ def format_element_text(element_text: str, link_href: str | None) -> str:
 
 def parse_html_with_trafilatura(html_content: str) -> str:
     """Parse HTML content using trafilatura."""
-    import trafilatura  # type: ignore
-    from trafilatura.settings import use_config  # type: ignore
+    import trafilatura
+    from trafilatura.settings import use_config
 
     config = use_config()
     config.set("DEFAULT", "include_links", "True")
@@ -164,7 +164,7 @@ def format_document_soup(
 
 
 def parse_html_page_basic(text: str | BytesIO | IO[bytes]) -> str:
-    soup = bs4.BeautifulSoup(text, "html.parser")
+    soup = bs4.BeautifulSoup(text, "lxml")
     return format_document_soup(soup)
 
 
@@ -174,7 +174,7 @@ def web_html_cleanup(
     additional_element_types_to_discard: list[str] | None = None,
 ) -> ParsedHTML:
     if isinstance(page_content, str):
-        soup = bs4.BeautifulSoup(page_content, "html.parser")
+        soup = bs4.BeautifulSoup(page_content, "lxml")
     else:
         soup = page_content
 

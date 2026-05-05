@@ -1,17 +1,21 @@
 import React, { useState } from "react";
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
 import Text from "@/refresh-components/texts/Text";
 import { Badge } from "@/components/ui/badge";
 import { AccessType } from "@/lib/types";
-import { EditIcon, NewChatIcon, SwapIcon } from "@/components/icons/icons";
+import { SvgEdit } from "@opal/icons";
 import {
   ConfluenceCredentialJson,
   Credential,
 } from "@/lib/connectors/credentials";
 import { Connector } from "@/lib/connectors/connectors";
-import IconButton from "@/refresh-components/buttons/IconButton";
-import { SvgAlertTriangle, SvgTrash } from "@opal/icons";
+import {
+  SvgArrowExchange,
+  SvgAlertTriangle,
+  SvgBubbleText,
+  SvgTrash,
+} from "@opal/icons";
+import { Button } from "@opal/components";
 interface CredentialSelectionTableProps {
   credentials: Credential<any>[];
   editableCredentials: Credential<any>[];
@@ -115,11 +119,11 @@ function CredentialSelectionTable({
                     {new Date(credential.time_updated).toLocaleString()}
                   </td>
                   <td className="p-2 flex gap-x-2 content-center mt-auto">
-                    <IconButton
+                    <Button
+                      disabled={selected || !editable}
                       onClick={async () => {
                         onDeleteCredential(credential);
                       }}
-                      disabled={selected || !editable}
                       icon={SvgTrash}
                     />
                     {onEditCredential && (
@@ -128,7 +132,7 @@ function CredentialSelectionTable({
                         onClick={() => onEditCredential(credential)}
                         className="cursor-pointer my-auto"
                       >
-                        <EditIcon />
+                        <SvgEdit />
                       </button>
                     )}
                   </td>
@@ -190,7 +194,7 @@ export default function ModifyCredential({
     <>
       {confirmDeletionCredential != null && (
         <Modal open onOpenChange={() => setConfirmDeletionCredential(null)}>
-          <Modal.Content small>
+          <Modal.Content width="sm" height="sm">
             <Modal.Header
               icon={SvgAlertTriangle}
               title="Confirm Deletion"
@@ -202,7 +206,7 @@ export default function ModifyCredential({
                 delete credentials that are linked to live connectors.
               </Text>
             </Modal.Body>
-            <Modal.Footer className="p-4 gap-2 justify-end">
+            <Modal.Footer>
               <Button
                 onClick={async () => {
                   onDeleteCredential(confirmDeletionCredential);
@@ -212,7 +216,7 @@ export default function ModifyCredential({
                 Confirm
               </Button>
               <Button
-                secondary
+                prominence="secondary"
                 onClick={() => setConfirmDeletionCredential(null)}
               >
                 Cancel
@@ -255,18 +259,8 @@ export default function ModifyCredential({
         {!showIfEmpty && (
           <div className="flex mt-8 justify-between">
             {onCreateNew ? (
-              <Button
-                onClick={() => {
-                  onCreateNew();
-                }}
-                className="bg-background-500 disabled:border-transparent
-              transition-colors duration-150 ease-in disabled:bg-background-300
-              disabled:hover:bg-background-300 hover:bg-background-600 cursor-pointer"
-              >
-                <div className="flex gap-x-2 items-center w-full border-none">
-                  <NewChatIcon className="text-white" />
-                  <p>Create</p>
-                </div>
+              <Button onClick={onCreateNew} icon={SvgBubbleText}>
+                Create
               </Button>
             ) : (
               <div />
@@ -285,14 +279,9 @@ export default function ModifyCredential({
                   onSwitch(selectedCredential!);
                 }
               }}
-              className="bg-indigo-500 disabled:border-transparent
-              transition-colors duration-150 ease-in disabled:bg-indigo-300
-              disabled:hover:bg-indigo-300 hover:bg-indigo-600 cursor-pointer"
+              icon={SvgArrowExchange}
             >
-              <div className="flex gap-x-2 items-center w-full border-none">
-                <SwapIcon className="text-white" />
-                <p>Select</p>
-              </div>
+              Select
             </Button>
           </div>
         )}

@@ -9,13 +9,12 @@ from unittest import mock
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
-from pywikibot import family  # type: ignore[import-untyped]
+from pywikibot import family
 from pywikibot import pagegenerators
-from pywikibot.scripts import generate_family_file  # type: ignore[import-untyped]
-from pywikibot.scripts.generate_user_files import pywikibot  # type: ignore[import-untyped]
+from pywikibot.scripts import generate_family_file
+from pywikibot.scripts.generate_user_files import pywikibot
 
 from onyx.utils.logger import setup_logger
-
 
 logger = setup_logger()
 
@@ -70,7 +69,7 @@ class FamilyFileGeneratorInMemory(generate_family_file.FamilyFileGenerator):
         """
         return True
 
-    def writefile(self, verify: Any) -> None:
+    def writefile(self, verify: Any) -> None:  # noqa: ARG002
         """Write the family file.
 
         This overrides the method in the parent class to write the family definition to memory instead of to disk.
@@ -134,7 +133,7 @@ def family_class_dispatch(url: str, name: str) -> type[family.Family]:
 
     """
     if "wikipedia" in url:
-        import pywikibot.families.wikipedia_family  # type: ignore[import-untyped]
+        import pywikibot.families.wikipedia_family
 
         return pywikibot.families.wikipedia_family.Family
     # TODO: Support additional families pre-defined in `pywikibot.families.*_family.py` files
@@ -159,7 +158,9 @@ if __name__ == "__main__":
     all_pages = itertools.chain(
         pages,
         *[
-            pagegenerators.CategorizedPageGenerator(category, recurse=recursion_depth)
+            pagegenerators.CategorizedPageGenerator(
+                category, recurse=recursion_depth  # ty: ignore[invalid-argument-type]
+            )
             for category in categories
         ],
     )

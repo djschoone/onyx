@@ -29,11 +29,15 @@ from onyx.kg.utils.formatting_utils import make_relationship_id
 from onyx.kg.utils.formatting_utils import make_relationship_type_id
 from onyx.kg.vespa.vespa_interactions import get_document_vespa_contents
 from onyx.llm.factory import get_default_llm
+from onyx.llm.models import UserMessage
 from onyx.llm.utils import llm_response_to_string
 from onyx.prompts.kg_prompts import CALL_CHUNK_PREPROCESSING_PROMPT
 from onyx.prompts.kg_prompts import CALL_DOCUMENT_CLASSIFICATION_PROMPT
 from onyx.prompts.kg_prompts import GENERAL_CHUNK_PREPROCESSING_PROMPT
 from onyx.prompts.kg_prompts import MASTER_EXTRACTION_PROMPT
+from onyx.tracing.flows import LLMFlow
+from onyx.tracing.llm_utils import llm_generation_span
+from onyx.tracing.llm_utils import record_llm_response
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -414,10 +418,19 @@ def kg_classify_document(
         vendor=kg_config_settings.KG_VENDOR,
     )
 
-    # classify with LLM
+    # classify with LLM with Braintrust tracing
     llm = get_default_llm()
     try:
-        raw_classification_result = llm_response_to_string(llm.invoke(prompt))
+        prompt_msg = UserMessage(content=prompt)
+        with llm_generation_span(
+            llm=llm,
+            flow=LLMFlow.KG_DOCUMENT_CLASSIFICATION,
+            input_messages=[prompt_msg],
+        ) as span_generation:
+            response = llm.invoke(prompt_msg)
+            record_llm_response(span_generation, response)
+            raw_classification_result = llm_response_to_string(response)
+
         classification_result = (
             raw_classification_result.replace("```json", "").replace("```", "").strip()
         )
@@ -478,10 +491,17 @@ def kg_deep_extract_chunks(
         relationship_types=relationship_types_str,
     ).replace("---content---", llm_context)
 
-    # extract with LLM
+    # extract with LLM with Braintrust tracing
     llm = get_default_llm()
     try:
-        raw_extraction_result = llm_response_to_string(llm.invoke(prompt))
+        prompt_msg = UserMessage(content=prompt)
+        with llm_generation_span(
+            llm=llm, flow=LLMFlow.KG_DEEP_EXTRACTION, input_messages=[prompt_msg]
+        ) as span_generation:
+            response = llm.invoke(prompt_msg)
+            record_llm_response(span_generation, response)
+            raw_extraction_result = llm_response_to_string(response)
+
         cleaned_response = (
             raw_extraction_result.replace("{{", "{")
             .replace("}}", "}")
@@ -503,8 +523,7 @@ def kg_deep_extract_chunks(
     except Exception as e:
         failed_chunks = [chunk.chunk_id for chunk in chunk_batch]
         logger.error(
-            f"Failed to process chunks {failed_chunks} "
-            f"from document {document_entity}. Error: {str(e)}"
+            f"Failed to process chunks {failed_chunks} from document {document_entity}. Error: {str(e)}"
         )
     return None
 
@@ -575,7 +594,9 @@ def get_batch_documents_metadata(
     return batch_metadata
 
 
-def trackinfo_to_str(trackinfo: KGAttributeTrackInfo | None) -> str:
+def trackinfo_to_str(
+    trackinfo: KGAttributeTrackInfo | None,
+) -> str:  # ty: ignore[invalid-return-type]
     """Convert trackinfo to an LLM friendly string"""
     if trackinfo is None:
         return ""

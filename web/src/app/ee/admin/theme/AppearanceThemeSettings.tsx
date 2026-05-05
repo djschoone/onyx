@@ -2,14 +2,13 @@
 
 import { FormField } from "@/refresh-components/form/FormField";
 import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
-import { Tabs, TabsList, TabsTrigger } from "@/refresh-components/tabs/tabs";
-import Separator from "@/refresh-components/Separator";
+import Tabs from "@/refresh-components/Tabs";
 import { Preview } from "./Preview";
 import InputTextArea from "@/refresh-components/inputs/InputTextArea";
 import Switch from "@/refresh-components/inputs/Switch";
 import CharacterCount from "@/refresh-components/CharacterCount";
 import InputImage from "@/refresh-components/inputs/InputImage";
-import Button from "@/refresh-components/buttons/Button";
+import { Button, Divider } from "@opal/components";
 import { useFormikContext } from "formik";
 import {
   forwardRef,
@@ -25,6 +24,7 @@ import { SvgEdit } from "@opal/icons";
 interface AppearanceThemeSettingsProps {
   selectedLogo: File | null;
   setSelectedLogo: (file: File | null) => void;
+  logoVersion: number;
   charLimits: {
     application_name: number;
     custom_greeting_message: number;
@@ -44,7 +44,7 @@ export const AppearanceThemeSettings = forwardRef<
   AppearanceThemeSettingsRef,
   AppearanceThemeSettingsProps
 >(function AppearanceThemeSettings(
-  { selectedLogo, setSelectedLogo, charLimits },
+  { selectedLogo, setSelectedLogo, logoVersion, charLimits },
   ref
 ) {
   const { values, errors, setFieldValue } = useFormikContext<any>();
@@ -173,15 +173,15 @@ export const AppearanceThemeSettings = forwardRef<
     };
   }, [logoObjectUrl]);
 
-  const getLogoSrc = () => {
+  const logoSrc = useMemo(() => {
     if (logoObjectUrl) {
       return logoObjectUrl;
     }
     if (values.use_custom_logo) {
-      return `/api/enterprise-settings/logo?u=${Date.now()}`;
+      return `/api/enterprise-settings/logo?v=${logoVersion}`;
     }
     return undefined;
-  };
+  }, [logoObjectUrl, values.use_custom_logo, logoVersion]);
 
   // Determine which tabs should be enabled
   const hasLogo = Boolean(selectedLogo || values.use_custom_logo);
@@ -227,7 +227,7 @@ export const AppearanceThemeSettings = forwardRef<
                 ref={applicationNameInputRef}
                 data-label="application-name-input"
                 showClearButton
-                error={!!errors.application_name}
+                variant={errors.application_name ? "error" : undefined}
                 value={values.application_name}
                 {...getPreviewHandlers("sidebar")}
                 onChange={(e) =>
@@ -252,16 +252,16 @@ export const AppearanceThemeSettings = forwardRef<
                   setFieldValue("logo_display_style", value)
                 }
               >
-                <TabsList className="w-full grid grid-cols-3">
-                  <TabsTrigger
+                <Tabs.List>
+                  <Tabs.Trigger
                     value="logo_and_name"
                     tooltip="Show both your application logo and name."
                     tooltipSide="top"
                     {...getPreviewHandlers("sidebar")}
                   >
                     Logo & Name
-                  </TabsTrigger>
-                  <TabsTrigger
+                  </Tabs.Trigger>
+                  <Tabs.Trigger
                     value="logo_only"
                     disabled={!hasLogo}
                     tooltip={
@@ -273,8 +273,8 @@ export const AppearanceThemeSettings = forwardRef<
                     {...getPreviewHandlers("sidebar")}
                   >
                     Logo Only
-                  </TabsTrigger>
-                  <TabsTrigger
+                  </Tabs.Trigger>
+                  <Tabs.Trigger
                     value="name_only"
                     disabled={!hasApplicationName}
                     tooltip={
@@ -286,8 +286,8 @@ export const AppearanceThemeSettings = forwardRef<
                     {...getPreviewHandlers("sidebar")}
                   >
                     Name Only
-                  </TabsTrigger>
-                </TabsList>
+                  </Tabs.Trigger>
+                </Tabs.List>
               </Tabs>
             </FormField.Control>
             <FormField.Description>
@@ -301,7 +301,7 @@ export const AppearanceThemeSettings = forwardRef<
           <FormField.Label>Application Logo</FormField.Label>
           <FormField.Control>
             <InputImage
-              src={getLogoSrc()}
+              src={logoSrc}
               onEdit={handleLogoEdit}
               onDrop={(file) => {
                 setSelectedLogo(file);
@@ -313,10 +313,10 @@ export const AppearanceThemeSettings = forwardRef<
           </FormField.Control>
           <div className="mt-2 w-full justify-center items-center flex">
             <Button
-              secondary
               disabled={!hasLogo}
+              prominence="secondary"
               onClick={handleLogoEdit}
-              leftIcon={SvgEdit}
+              icon={SvgEdit}
             >
               Update
             </Button>
@@ -324,7 +324,7 @@ export const AppearanceThemeSettings = forwardRef<
         </FormField>
       </div>
 
-      <Separator className="my-4" />
+      <Divider />
 
       <Preview
         className="mb-8"
@@ -339,7 +339,7 @@ export const AppearanceThemeSettings = forwardRef<
         greeting_message={
           values.custom_greeting_message || "Welcome to Acme Chat"
         }
-        logoSrc={getLogoSrc()}
+        logoSrc={logoSrc}
         highlightTarget={highlightTarget}
       />
 
@@ -359,7 +359,7 @@ export const AppearanceThemeSettings = forwardRef<
             ref={greetingMessageInputRef}
             data-label="greeting-message-input"
             showClearButton
-            error={!!errors.custom_greeting_message}
+            variant={errors.custom_greeting_message ? "error" : undefined}
             value={values.custom_greeting_message}
             {...getPreviewHandlers("greeting")}
             onChange={(e) =>
@@ -391,7 +391,7 @@ export const AppearanceThemeSettings = forwardRef<
             ref={headerContentInputRef}
             data-label="chat-header-input"
             showClearButton
-            error={!!errors.custom_header_content}
+            variant={errors.custom_header_content ? "error" : undefined}
             value={values.custom_header_content}
             {...getPreviewHandlers("chat_header")}
             onChange={(e) =>
@@ -423,7 +423,9 @@ export const AppearanceThemeSettings = forwardRef<
             data-label="chat-footer-textarea"
             rows={3}
             placeholder="Add markdown content"
-            error={!!errors.custom_lower_disclaimer_content}
+            variant={
+              errors.custom_lower_disclaimer_content ? "error" : undefined
+            }
             value={values.custom_lower_disclaimer_content}
             {...getPreviewHandlers("chat_footer")}
             onChange={(e) =>
@@ -439,7 +441,7 @@ export const AppearanceThemeSettings = forwardRef<
         />
       </FormField>
 
-      <Separator className="my-4" />
+      <Divider />
 
       <div className="flex flex-col gap-4 p-4 bg-background-tint-00 rounded-16">
         <FormField state="idle" className="gap-0">
@@ -480,7 +482,7 @@ export const AppearanceThemeSettings = forwardRef<
                   ref={noticeHeaderInputRef}
                   data-label="notice-header-input"
                   showClearButton
-                  error={!!errors.custom_popup_header}
+                  variant={errors.custom_popup_header ? "error" : undefined}
                   value={values.custom_popup_header}
                   onChange={(e) =>
                     setFieldValue("custom_popup_header", e.target.value)
@@ -510,7 +512,7 @@ export const AppearanceThemeSettings = forwardRef<
                   data-label="notice-content-textarea"
                   rows={3}
                   placeholder="Add markdown content"
-                  error={!!errors.custom_popup_content}
+                  variant={errors.custom_popup_content ? "error" : undefined}
                   value={values.custom_popup_content}
                   onChange={(e) =>
                     setFieldValue("custom_popup_content", e.target.value)
@@ -563,7 +565,7 @@ export const AppearanceThemeSettings = forwardRef<
                     data-label="consent-prompt-textarea"
                     rows={3}
                     placeholder="Add markdown content"
-                    error={!!errors.consent_screen_prompt}
+                    variant={errors.consent_screen_prompt ? "error" : undefined}
                     value={values.consent_screen_prompt}
                     onChange={(e) => {
                       setFieldValue("consent_screen_prompt", e.target.value);

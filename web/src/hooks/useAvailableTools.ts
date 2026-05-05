@@ -1,6 +1,9 @@
+"use client";
+
 import useSWR from "swr";
 import { ToolSnapshot } from "@/lib/tools/interfaces";
 import { errorHandlingFetcher } from "@/lib/fetcher";
+import { SWR_KEYS } from "@/lib/swr-keys";
 
 /**
  * Hook to fetch all available tools from the backend.
@@ -22,10 +25,12 @@ import { errorHandlingFetcher } from "@/lib/fetcher";
  */
 export function useAvailableTools() {
   const { data, error, mutate } = useSWR<ToolSnapshot[]>(
-    "/api/tool",
+    SWR_KEYS.tools,
     errorHandlingFetcher,
     {
-      revalidateOnFocus: true,
+      revalidateOnFocus: false,
+      revalidateIfStale: false,
+      dedupingInterval: 60000,
     }
   );
 

@@ -1,15 +1,15 @@
 "use client";
 
 import AuthFlowContainer from "@/components/auth/AuthFlowContainer";
-import { HealthCheckBanner } from "@/components/health/healthcheck";
-import { useUser } from "@/components/user/UserProvider";
+
+import { useUser } from "@/providers/UserProvider";
 import { redirect, useRouter } from "next/navigation";
 import type { Route } from "next";
 import { Formik, Form, FormikHelpers } from "formik";
 import * as Yup from "yup";
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import { TextFormField } from "@/components/Field";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import Text from "@/refresh-components/texts/Text";
 
 const ImpersonateSchema = Yup.object().shape({
@@ -20,14 +20,12 @@ const ImpersonateSchema = Yup.object().shape({
 export default function ImpersonatePage() {
   const router = useRouter();
   const { user, isCloudSuperuser } = useUser();
-  const { popup, setPopup } = usePopup();
-
   if (!user) {
     redirect("/auth/login");
   }
 
   if (!isCloudSuperuser) {
-    redirect("/chat" as Route);
+    redirect("/app" as Route);
   }
 
   const handleImpersonate = async (
@@ -47,32 +45,22 @@ export default function ImpersonatePage() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        setPopup({
-          message: errorData.detail || "Failed to impersonate user",
-          type: "error",
-        });
+        toast.error(errorData.detail || "Failed to impersonate user");
         helpers.setSubmitting(false);
       } else {
         helpers.setSubmitting(false);
-        router.push("/chat" as Route);
+        router.push("/app" as Route);
       }
     } catch (error) {
-      setPopup({
-        message:
-          error instanceof Error ? error.message : "Failed to impersonate user",
-        type: "error",
-      });
+      toast.error(
+        error instanceof Error ? error.message : "Failed to impersonate user"
+      );
       helpers.setSubmitting(false);
     }
   };
 
   return (
     <AuthFlowContainer>
-      {popup}
-      <div className="absolute top-10x w-full">
-        <HealthCheckBanner />
-      </div>
-
       <div className="flex flex-col w-full justify-center">
         <div className="w-full flex flex-col items-center justify-center">
           <Text as="p" headingH3 className="mb-6 text-center">
@@ -101,7 +89,7 @@ export default function ImpersonatePage() {
                 placeholder="Enter API Key"
               />
 
-              <Button type="submit" className="w-full" disabled={isSubmitting}>
+              <Button disabled={isSubmitting} type="submit" width="full">
                 Impersonate User
               </Button>
             </Form>

@@ -8,9 +8,10 @@ from typing import cast
 from typing import TypeVar
 
 import requests
-from hubspot import HubSpot  # type: ignore
+from hubspot import HubSpot
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.hubspot.rate_limit import HubSpotRateLimiter
 from onyx.connectors.interfaces import GenerateDocumentsOutput
@@ -19,6 +20,7 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import TextSection
 from onyx.utils.logger import setup_logger
@@ -143,7 +145,9 @@ class HubSpotConnector(LoadConnector, PollConnector):
             "Content-Type": "application/json",
         }
 
-        response = requests.get(HUBSPOT_API_URL, headers=headers)
+        response = requests.get(
+            HUBSPOT_API_URL, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS
+        )
         if response.status_code != 200:
             raise Exception("Error fetching portal ID")
 
@@ -180,23 +184,52 @@ class HubSpotConnector(LoadConnector, PollConnector):
         else:
             return f"{HUBSPOT_BASE_URL}/contacts/{self.portal_id}/{object_type}/{object_id}"
 
+    def _extract_inline_association_ids(
+        self,
+        obj: Any,
+        assoc_type: str,
+    ) -> list[str] | None:
+        """Extract association IDs already returned inline by get_page.
+
+        Returns None when the inline data is incomplete (overflow) or when
+        associations is not a dict (not fetched or unexpected SDK type), so the
+        caller falls back to a dedicated v4 associations API call instead.
+        Returns [] when the type simply has no associations.
+        """
+        associations = getattr(obj, "associations", None)
+        if not isinstance(associations, dict):
+            return None
+        assoc_collection = associations.get(assoc_type)
+        if assoc_collection is None:
+            return []
+        if assoc_collection.paging and assoc_collection.paging.next:
+            return None
+        return list(dict.fromkeys(r.id for r in (assoc_collection.results or [])))
+
     def _get_associated_objects(
         self,
         api_client: HubSpot,
         object_id: str,
         from_object_type: str,
         to_object_type: str,
+        inline_association_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get associated objects for a given object"""
         try:
-            associations_iter = self._paginated_results(
-                api_client.crm.associations.v4.basic_api.get_page,
-                object_type=from_object_type,
-                object_id=object_id,
-                to_object_type=to_object_type,
-            )
-
-            object_ids = [assoc.to_object_id for assoc in associations_iter]
+            if inline_association_ids is not None:
+                object_ids = inline_association_ids
+            else:
+                associations_iter = self._paginated_results(
+                    api_client.crm.associations.v4.basic_api.get_page,
+                    object_type=from_object_type,
+                    object_id=object_id,
+                    to_object_type=to_object_type,
+                )
+                object_ids = list(
+                    dict.fromkeys(
+                        str(assoc.to_object_id) for assoc in associations_iter
+                    )
+                )
 
             associated_objects: list[dict[str, Any]] = []
 
@@ -414,7 +447,7 @@ class HubSpotConnector(LoadConnector, PollConnector):
             associations=["contacts", "companies", "deals"],
         )
 
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
 
         for ticket in tickets_iter:
             updated_at = ticket.updated_at.replace(tzinfo=None)
@@ -445,7 +478,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated contacts
             associated_contacts = self._get_associated_objects(
-                api_client, ticket.id, "tickets", "contacts"
+                api_client,
+                ticket.id,
+                "tickets",
+                "contacts",
+                inline_association_ids=self._extract_inline_association_ids(
+                    ticket, "contacts"
+                ),
             )
             for contact in associated_contacts:
                 sections.append(self._create_object_section(contact, "contacts"))
@@ -453,7 +492,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated companies
             associated_companies = self._get_associated_objects(
-                api_client, ticket.id, "tickets", "companies"
+                api_client,
+                ticket.id,
+                "tickets",
+                "companies",
+                inline_association_ids=self._extract_inline_association_ids(
+                    ticket, "companies"
+                ),
             )
             for company in associated_companies:
                 sections.append(self._create_object_section(company, "companies"))
@@ -461,7 +506,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated deals
             associated_deals = self._get_associated_objects(
-                api_client, ticket.id, "tickets", "deals"
+                api_client,
+                ticket.id,
+                "tickets",
+                "deals",
+                inline_association_ids=self._extract_inline_association_ids(
+                    ticket, "deals"
+                ),
             )
             for deal in associated_deals:
                 sections.append(self._create_object_section(deal, "deals"))
@@ -490,6 +541,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
                     semantic_identifier=title,
                     doc_updated_at=ticket.updated_at.replace(tzinfo=timezone.utc),
                     metadata=metadata,
+                    doc_metadata={
+                        "hierarchy": {
+                            "source_path": ["Tickets"],
+                            "object_type": "ticket",
+                            "object_id": ticket.id,
+                        }
+                    },
                 )
             )
 
@@ -520,7 +578,7 @@ class HubSpotConnector(LoadConnector, PollConnector):
             associations=["contacts", "deals", "tickets"],
         )
 
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
 
         for company in companies_iter:
             updated_at = company.updated_at.replace(tzinfo=None)
@@ -570,7 +628,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated contacts
             associated_contacts = self._get_associated_objects(
-                api_client, company.id, "companies", "contacts"
+                api_client,
+                company.id,
+                "companies",
+                "contacts",
+                inline_association_ids=self._extract_inline_association_ids(
+                    company, "contacts"
+                ),
             )
             for contact in associated_contacts:
                 sections.append(self._create_object_section(contact, "contacts"))
@@ -578,7 +642,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated deals
             associated_deals = self._get_associated_objects(
-                api_client, company.id, "companies", "deals"
+                api_client,
+                company.id,
+                "companies",
+                "deals",
+                inline_association_ids=self._extract_inline_association_ids(
+                    company, "deals"
+                ),
             )
             for deal in associated_deals:
                 sections.append(self._create_object_section(deal, "deals"))
@@ -586,7 +656,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated tickets
             associated_tickets = self._get_associated_objects(
-                api_client, company.id, "companies", "tickets"
+                api_client,
+                company.id,
+                "companies",
+                "tickets",
+                inline_association_ids=self._extract_inline_association_ids(
+                    company, "tickets"
+                ),
             )
             for ticket in associated_tickets:
                 sections.append(self._create_object_section(ticket, "tickets"))
@@ -615,6 +691,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
                     semantic_identifier=title,
                     doc_updated_at=company.updated_at.replace(tzinfo=timezone.utc),
                     metadata=metadata,
+                    doc_metadata={
+                        "hierarchy": {
+                            "source_path": ["Companies"],
+                            "object_type": "company",
+                            "object_id": company.id,
+                        }
+                    },
                 )
             )
 
@@ -645,7 +728,7 @@ class HubSpotConnector(LoadConnector, PollConnector):
             associations=["contacts", "companies", "tickets"],
         )
 
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
 
         for deal in deals_iter:
             updated_at = deal.updated_at.replace(tzinfo=None)
@@ -695,7 +778,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated contacts
             associated_contacts = self._get_associated_objects(
-                api_client, deal.id, "deals", "contacts"
+                api_client,
+                deal.id,
+                "deals",
+                "contacts",
+                inline_association_ids=self._extract_inline_association_ids(
+                    deal, "contacts"
+                ),
             )
             for contact in associated_contacts:
                 sections.append(self._create_object_section(contact, "contacts"))
@@ -703,7 +792,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated companies
             associated_companies = self._get_associated_objects(
-                api_client, deal.id, "deals", "companies"
+                api_client,
+                deal.id,
+                "deals",
+                "companies",
+                inline_association_ids=self._extract_inline_association_ids(
+                    deal, "companies"
+                ),
             )
             for company in associated_companies:
                 sections.append(self._create_object_section(company, "companies"))
@@ -711,7 +806,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated tickets
             associated_tickets = self._get_associated_objects(
-                api_client, deal.id, "deals", "tickets"
+                api_client,
+                deal.id,
+                "deals",
+                "tickets",
+                inline_association_ids=self._extract_inline_association_ids(
+                    deal, "tickets"
+                ),
             )
             for ticket in associated_tickets:
                 sections.append(self._create_object_section(ticket, "tickets"))
@@ -738,6 +839,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
                     semantic_identifier=title,
                     doc_updated_at=deal.updated_at.replace(tzinfo=timezone.utc),
                     metadata=metadata,
+                    doc_metadata={
+                        "hierarchy": {
+                            "source_path": ["Deals"],
+                            "object_type": "deal",
+                            "object_id": deal.id,
+                        }
+                    },
                 )
             )
 
@@ -770,7 +878,7 @@ class HubSpotConnector(LoadConnector, PollConnector):
             associations=["companies", "deals", "tickets"],
         )
 
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
 
         for contact in contacts_iter:
             updated_at = contact.updated_at.replace(tzinfo=None)
@@ -836,7 +944,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated companies
             associated_companies = self._get_associated_objects(
-                api_client, contact.id, "contacts", "companies"
+                api_client,
+                contact.id,
+                "contacts",
+                "companies",
+                inline_association_ids=self._extract_inline_association_ids(
+                    contact, "companies"
+                ),
             )
             for company in associated_companies:
                 sections.append(self._create_object_section(company, "companies"))
@@ -844,7 +958,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated deals
             associated_deals = self._get_associated_objects(
-                api_client, contact.id, "contacts", "deals"
+                api_client,
+                contact.id,
+                "contacts",
+                "deals",
+                inline_association_ids=self._extract_inline_association_ids(
+                    contact, "deals"
+                ),
             )
             for deal in associated_deals:
                 sections.append(self._create_object_section(deal, "deals"))
@@ -852,7 +972,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
 
             # Get associated tickets
             associated_tickets = self._get_associated_objects(
-                api_client, contact.id, "contacts", "tickets"
+                api_client,
+                contact.id,
+                "contacts",
+                "tickets",
+                inline_association_ids=self._extract_inline_association_ids(
+                    contact, "tickets"
+                ),
             )
             for ticket in associated_tickets:
                 sections.append(self._create_object_section(ticket, "tickets"))
@@ -881,6 +1007,13 @@ class HubSpotConnector(LoadConnector, PollConnector):
                     semantic_identifier=title,
                     doc_updated_at=contact.updated_at.replace(tzinfo=timezone.utc),
                     metadata=metadata,
+                    doc_metadata={
+                        "hierarchy": {
+                            "source_path": ["Contacts"],
+                            "object_type": "contact",
+                            "object_id": contact.id,
+                        }
+                    },
                 )
             )
 

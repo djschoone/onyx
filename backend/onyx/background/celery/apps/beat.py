@@ -3,7 +3,7 @@ from typing import Any
 
 from celery import Celery
 from celery import signals
-from celery.beat import PersistentScheduler  # type: ignore
+from celery.beat import PersistentScheduler  # ty: ignore[unresolved-import]
 from celery.signals import beat_init
 from celery.utils.log import get_task_logger
 
@@ -181,9 +181,7 @@ class DynamicTenantScheduler(PersistentScheduler):
         if not do_update:
             # exit early if nothing changed
             task_logger.info(
-                f"_try_updating_schedule - Schedule unchanged: "
-                f"tasks={len(new_schedule)} "
-                f"beat_multiplier={beat_multiplier}"
+                f"_try_updating_schedule - Schedule unchanged: tasks={len(new_schedule)} beat_multiplier={beat_multiplier}"
             )
             return
 

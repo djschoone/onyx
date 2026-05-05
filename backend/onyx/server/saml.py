@@ -13,7 +13,7 @@ from fastapi import Response
 from fastapi import status
 from fastapi_users import exceptions
 from fastapi_users.authentication import Strategy
-from onelogin.saml2.auth import OneLogin_Saml2_Auth  # type: ignore
+from onelogin.saml2.auth import OneLogin_Saml2_Auth
 from pydantic import BaseModel
 
 from onyx.auth.schemas import UserCreate
@@ -24,12 +24,12 @@ from onyx.auth.users import get_user_manager
 from onyx.auth.users import UserManager
 from onyx.configs.app_configs import REQUIRE_EMAIL_VERIFICATION
 from onyx.configs.app_configs import SAML_CONF_DIR
+from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.db.auth import get_user_count
 from onyx.db.auth import get_user_db
 from onyx.db.engine.async_sql_engine import get_async_session_context_manager
 from onyx.db.models import User
 from onyx.utils.logger import setup_logger
-
 
 logger = setup_logger()
 router = APIRouter(prefix="/auth/saml")
@@ -69,7 +69,7 @@ async def upsert_saml_user(email: str) -> User:
                 try:
                     user = await user_manager.get_by_email(email)
                     # If user has a non-authenticated role, treat as non-existent
-                    if not user.role.is_web_login():
+                    if not user.account_type.is_web_login():
                         raise exceptions.UserNotExists()
                     return user
                 except exceptions.UserNotExists:
@@ -123,9 +123,12 @@ async def prepare_from_fastapi_request(request: Request) -> dict[str, Any]:
     if request.client is None:
         raise ValueError("Invalid request for SAML")
 
-    # Use X-Forwarded headers if available
-    http_host = request.headers.get("X-Forwarded-Host") or request.client.host
-    server_port = request.headers.get("X-Forwarded-Port") or request.url.port
+    # Derive http_host and server_port from WEB_DOMAIN (a trusted env var)
+    # instead of X-Forwarded-* headers, which can be spoofed by an attacker
+    # to poison SAML redirect URLs (host header poisoning).
+    parsed_domain = urlparse(WEB_DOMAIN)
+    http_host = parsed_domain.hostname or request.client.host
+    server_port = parsed_domain.port or (443 if parsed_domain.scheme == "https" else 80)
 
     rv: dict[str, Any] = {
         "http_host": http_host,

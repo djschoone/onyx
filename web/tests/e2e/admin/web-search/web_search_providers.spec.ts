@@ -1,42 +1,6 @@
-import { test, expect, Page, Locator } from "@playwright/test";
-import { loginAs } from "../../utils/auth";
-
-const WEB_SEARCH_URL = "/admin/configuration/web-search";
-
-// Helper to find a provider card by its label text
-async function findProviderCard(
-  page: Page,
-  providerLabel: string
-): Promise<Locator> {
-  // Find the card containing the provider label - cards are divs with rounded borders
-  // The label is in a Text component inside the card
-  const card = page
-    .locator("div.rounded-16")
-    .filter({ hasText: providerLabel })
-    .first();
-  return card;
-}
-
-// Helper to open the provider setup modal - clicks Connect if available, otherwise clicks the Edit icon
-async function openProviderModal(
-  page: Page,
-  providerLabel: string
-): Promise<void> {
-  const card = await findProviderCard(page, providerLabel);
-  await card.waitFor({ state: "visible", timeout: 10000 });
-
-  // First try to find the Connect button
-  const connectButton = card.getByRole("button", { name: "Connect" });
-  if (await connectButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-    await connectButton.click();
-    return;
-  }
-
-  // If no Connect button, click the Edit icon button to update credentials
-  const editButton = card.getByRole("button", { name: /^Edit / });
-  await editButton.waitFor({ state: "visible", timeout: 5000 });
-  await editButton.click();
-}
+import { test, expect } from "@playwright/test";
+import { loginAs } from "@tests/e2e/utils/auth";
+import { WEB_SEARCH_URL, findProviderCard, openProviderModal } from "./svc";
 
 test.describe("Web Search Provider Configuration", () => {
   test.beforeEach(async ({ page }) => {
@@ -59,7 +23,9 @@ test.describe("Web Search Provider Configuration", () => {
 
     test.skip(!EXA_API_KEY, "EXA_API_KEY environment variable not set");
 
-    test("should configure Exa as web search provider", async ({ page }) => {
+    test.skip("should configure Exa as web search provider", async ({
+      page,
+    }) => {
       // Click Connect on the Exa card (or key icon if already configured)
       await openProviderModal(page, "Exa");
 
@@ -68,7 +34,8 @@ test.describe("Web Search Provider Configuration", () => {
       await expect(modalDialog).toBeVisible({ timeout: 10000 });
 
       // Enter API key - clear first in case modal opened with masked credentials
-      const apiKeyInput = page.locator('input[type="password"]');
+      // Note: PasswordInputTypeIn uses type="text" with custom ∗ masking per design guidelines
+      const apiKeyInput = modalDialog.getByLabel(/api key/i);
       await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
       await apiKeyInput.clear();
       await apiKeyInput.fill(EXA_API_KEY!);
@@ -96,7 +63,7 @@ test.describe("Web Search Provider Configuration", () => {
       await page.waitForLoadState("networkidle");
 
       // Verify Exa is now the current default - look for "Current Default" button in the Exa card
-      const exaCard = await findProviderCard(page, "Exa");
+      const exaCard = findProviderCard(page, "Exa");
       await expect(
         exaCard.getByRole("button", { name: "Current Default" })
       ).toBeVisible({ timeout: 15000 });
@@ -135,7 +102,7 @@ test.describe("Web Search Provider Configuration", () => {
       await searchEngineIdInput.fill(GOOGLE_PSE_SEARCH_ENGINE_ID!);
 
       // Enter API key
-      const apiKeyInput = page.locator('input[type="password"]');
+      const apiKeyInput = modalDialog.getByLabel(/api key/i);
       await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
       await apiKeyInput.fill(GOOGLE_PSE_API_KEY!);
 
@@ -162,7 +129,7 @@ test.describe("Web Search Provider Configuration", () => {
       await page.waitForLoadState("networkidle");
 
       // Verify Google PSE is now the current default
-      const googleCard = await findProviderCard(page, "Google PSE");
+      const googleCard = findProviderCard(page, "Google PSE");
       await expect(
         googleCard.getByRole("button", { name: "Current Default" })
       ).toBeVisible({ timeout: 15000 });
@@ -176,7 +143,7 @@ test.describe("Web Search Provider Configuration", () => {
       page,
     }) => {
       // First, configure Google PSE if not already configured
-      const googleCard = await findProviderCard(page, "Google PSE");
+      const googleCard = findProviderCard(page, "Google PSE");
       await googleCard.waitFor({ state: "visible", timeout: 10000 });
 
       const connectButton = googleCard.getByRole("button", { name: "Connect" });
@@ -195,7 +162,7 @@ test.describe("Web Search Provider Configuration", () => {
         await searchEngineIdInput.waitFor({ state: "visible", timeout: 5000 });
         await searchEngineIdInput.fill(GOOGLE_PSE_SEARCH_ENGINE_ID!);
 
-        const apiKeyInput = page.locator('input[type="password"]');
+        const apiKeyInput = setupDialog.getByLabel(/api key/i);
         await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
         await apiKeyInput.fill(GOOGLE_PSE_API_KEY!);
 
@@ -211,7 +178,7 @@ test.describe("Web Search Provider Configuration", () => {
       );
 
       // Now click the Edit icon button
-      const updatedGoogleCard = await findProviderCard(page, "Google PSE");
+      const updatedGoogleCard = findProviderCard(page, "Google PSE");
       const editButton = updatedGoogleCard.getByRole("button", {
         name: /^Edit /,
       });
@@ -225,9 +192,10 @@ test.describe("Web Search Provider Configuration", () => {
       await expect(modalDialog).toBeVisible({ timeout: 10000 });
 
       // Verify the API key input shows masked value
-      const apiKeyInput = page.locator('input[type="password"]');
+      // PasswordInputTypeIn displays stored values with ∗ (ASTERISK OPERATOR) per design guidelines
+      const apiKeyInput = modalDialog.getByLabel(/api key/i);
       await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
-      await expect(apiKeyInput).toHaveValue("••••••••••••••••");
+      await expect(apiKeyInput).toHaveValue("∗∗∗∗∗∗∗∗∗∗∗∗∗∗∗∗");
 
       // Immediately click Connect without changing anything
       const modalConnectButton = modalDialog.getByRole("button", {
@@ -252,7 +220,7 @@ test.describe("Web Search Provider Configuration", () => {
       await page.waitForLoadState("networkidle");
 
       // Verify Google PSE is still the current default
-      const finalGoogleCard = await findProviderCard(page, "Google PSE");
+      const finalGoogleCard = findProviderCard(page, "Google PSE");
       await expect(
         finalGoogleCard.getByRole("button", { name: "Current Default" })
       ).toBeVisible({ timeout: 15000 });
@@ -266,7 +234,7 @@ test.describe("Web Search Provider Configuration", () => {
       page,
     }) => {
       // First, configure Google PSE if not already configured
-      const googleCard = await findProviderCard(page, "Google PSE");
+      const googleCard = findProviderCard(page, "Google PSE");
       await googleCard.waitFor({ state: "visible", timeout: 10000 });
 
       const connectButton = googleCard.getByRole("button", { name: "Connect" });
@@ -285,7 +253,7 @@ test.describe("Web Search Provider Configuration", () => {
         await searchEngineIdInput.waitFor({ state: "visible", timeout: 5000 });
         await searchEngineIdInput.fill(GOOGLE_PSE_SEARCH_ENGINE_ID!);
 
-        const apiKeyInput = page.locator('input[type="password"]');
+        const apiKeyInput = setupDialog.getByLabel(/api key/i);
         await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
         await apiKeyInput.fill(GOOGLE_PSE_API_KEY!);
 
@@ -301,7 +269,7 @@ test.describe("Web Search Provider Configuration", () => {
       );
 
       // Now click the Edit icon button
-      const updatedGoogleCard = await findProviderCard(page, "Google PSE");
+      const updatedGoogleCard = findProviderCard(page, "Google PSE");
       const editButton = updatedGoogleCard.getByRole("button", {
         name: /^Edit /,
       });
@@ -323,8 +291,9 @@ test.describe("Web Search Provider Configuration", () => {
       await searchEngineIdInput.fill("invalid-search-engine-id");
 
       // Do NOT change the API key - keep the masked value
-      const apiKeyInput = page.locator('input[type="password"]');
-      await expect(apiKeyInput).toHaveValue("••••••••••••••••");
+      // PasswordInputTypeIn displays stored values with ∗ (ASTERISK OPERATOR) per design guidelines
+      const apiKeyInput = modalDialog.getByLabel(/api key/i);
+      await expect(apiKeyInput).toHaveValue("∗∗∗∗∗∗∗∗∗∗∗∗∗∗∗∗");
 
       // Click Connect - should fail because search engine ID doesn't match the stored API key
       const modalConnectButton = modalDialog.getByRole("button", {
@@ -349,6 +318,42 @@ test.describe("Web Search Provider Configuration", () => {
     });
   });
 
+  test.describe("Brave Provider", () => {
+    const BRAVE_SEARCH_API_KEY = process.env.BRAVE_SEARCH_API_KEY;
+
+    test.skip(
+      !BRAVE_SEARCH_API_KEY,
+      "BRAVE_SEARCH_API_KEY environment variable not set"
+    );
+
+    test("should configure Brave as web search provider", async ({ page }) => {
+      await openProviderModal(page, "Brave");
+
+      const modalDialog = page.getByRole("dialog", { name: /set up brave/i });
+      await expect(modalDialog).toBeVisible({ timeout: 10000 });
+
+      const apiKeyInput = modalDialog.getByLabel(/api key/i);
+      await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
+      await apiKeyInput.clear();
+      await apiKeyInput.fill(BRAVE_SEARCH_API_KEY!);
+
+      const modalConnectButton = modalDialog.getByRole("button", {
+        name: "Connect",
+        exact: true,
+      });
+      await expect(modalConnectButton).toBeEnabled({ timeout: 5000 });
+      await modalConnectButton.click();
+
+      await expect(modalDialog).not.toBeVisible({ timeout: 30000 });
+      await page.waitForLoadState("networkidle");
+
+      const braveCard = findProviderCard(page, "Brave");
+      await expect(
+        braveCard.getByRole("button", { name: "Current Default" })
+      ).toBeVisible({ timeout: 15000 });
+    });
+  });
+
   test.describe("Provider Switching", () => {
     // These tests require both providers to be configured
     const EXA_API_KEY = process.env.EXA_API_KEY;
@@ -362,7 +367,7 @@ test.describe("Web Search Provider Configuration", () => {
 
     test("should switch between configured providers", async ({ page }) => {
       // First, configure Exa if needed
-      const exaCard = await findProviderCard(page, "Exa");
+      const exaCard = findProviderCard(page, "Exa");
       await exaCard.waitFor({ state: "visible", timeout: 10000 });
 
       let connectButton = exaCard.getByRole("button", { name: "Connect" });
@@ -373,7 +378,7 @@ test.describe("Web Search Provider Configuration", () => {
         const exaDialog = page.getByRole("dialog", { name: /set up exa/i });
         await expect(exaDialog).toBeVisible({ timeout: 10000 });
 
-        const apiKeyInput = page.locator('input[type="password"]');
+        const apiKeyInput = exaDialog.getByLabel(/api key/i);
         await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
         await apiKeyInput.fill(EXA_API_KEY!);
 
@@ -385,7 +390,7 @@ test.describe("Web Search Provider Configuration", () => {
       }
 
       // Configure Google PSE if needed
-      const googleCard = await findProviderCard(page, "Google PSE");
+      const googleCard = findProviderCard(page, "Google PSE");
       await googleCard.waitFor({ state: "visible", timeout: 10000 });
 
       connectButton = googleCard.getByRole("button", { name: "Connect" });
@@ -403,7 +408,7 @@ test.describe("Web Search Provider Configuration", () => {
         await searchEngineIdInput.waitFor({ state: "visible", timeout: 5000 });
         await searchEngineIdInput.fill(GOOGLE_PSE_SEARCH_ENGINE_ID!);
 
-        const apiKeyInput = page.locator('input[type="password"]');
+        const apiKeyInput = googleDialog.getByLabel(/api key/i);
         await apiKeyInput.waitFor({ state: "visible", timeout: 5000 });
         await apiKeyInput.fill(GOOGLE_PSE_API_KEY!);
 

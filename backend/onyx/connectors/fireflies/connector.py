@@ -1,3 +1,4 @@
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
@@ -7,6 +8,7 @@ from typing import List
 import requests
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.interfaces import GenerateDocumentsOutput
 from onyx.connectors.interfaces import LoadConnector
@@ -15,6 +17,7 @@ from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import TextSection
 from onyx.utils.logger import setup_logger
@@ -26,6 +29,8 @@ _FIREFLIES_ID_PREFIX = "FIREFLIES_"
 _FIREFLIES_API_URL = "https://api.fireflies.ai/graphql"
 
 _FIREFLIES_TRANSCRIPT_QUERY_SIZE = 50  # Max page size is 50
+_FIREFLIES_MAX_RETRIES = 3
+_FIREFLIES_RETRY_BASE_DELAY_SECONDS = 2
 
 _FIREFLIES_API_QUERY = """
     query Transcripts($fromDate: DateTime, $toDate: DateTime, $limit: Int!, $skip: Int!) {
@@ -89,6 +94,9 @@ def _create_doc_from_transcript(transcript: dict) -> Document | None:
     meeting_date_unix = transcript["date"]
     meeting_date = datetime.fromtimestamp(meeting_date_unix / 1000, tz=timezone.utc)
 
+    # Build hierarchy based on meeting date (year-month)
+    year_month = meeting_date.strftime("%Y-%m")
+
     meeting_organizer_email = transcript["organizer_email"]
     organizer_email_user_info = [BasicExpertInfo(email=meeting_organizer_email)]
 
@@ -102,6 +110,14 @@ def _create_doc_from_transcript(transcript: dict) -> Document | None:
         sections=cast(list[TextSection | ImageSection], sections),
         source=DocumentSource.FIREFLIES,
         semantic_identifier=meeting_title,
+        doc_metadata={
+            "hierarchy": {
+                "source_path": [year_month],
+                "year_month": year_month,
+                "meeting_title": meeting_title,
+                "organizer_email": meeting_organizer_email,
+            }
+        },
         metadata={
             k: str(v)
             for k, v in {
@@ -157,12 +173,29 @@ class FirefliesConnector(PollConnector, LoadConnector):
 
         while True:
             variables["skip"] = skip
-            response = requests.post(
-                _FIREFLIES_API_URL,
-                headers=headers,
-                json={"query": _FIREFLIES_API_QUERY, "variables": variables},
-            )
+            # Retry 5xx with exponential backoff — Fireflies occasionally
+            # returns 500 / 504 for transient errors (ONYX-BACKEND-H6FJ/H6FH).
+            # 4xx still raises immediately because those are not retryable.
+            response: requests.Response | None = None
+            for attempt in range(_FIREFLIES_MAX_RETRIES):
+                response = requests.post(
+                    _FIREFLIES_API_URL,
+                    headers=headers,
+                    json={
+                        "query": _FIREFLIES_API_QUERY,
+                        "variables": variables,
+                    },
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+                if response.status_code < 500 or attempt == _FIREFLIES_MAX_RETRIES - 1:
+                    break
+                logger.warning(
+                    f"Fireflies returned {response.status_code} on attempt "
+                    f"{attempt + 1}/{_FIREFLIES_MAX_RETRIES}, retrying"
+                )
+                time.sleep(_FIREFLIES_RETRY_BASE_DELAY_SECONDS * (2**attempt))
 
+            assert response is not None  # loop always runs at least once
             response.raise_for_status()
 
             if response.status_code == 204:
@@ -183,7 +216,7 @@ class FirefliesConnector(PollConnector, LoadConnector):
     def _process_transcripts(
         self, start: str | None = None, end: str | None = None
     ) -> GenerateDocumentsOutput:
-        doc_batch: List[Document] = []
+        doc_batch: List[Document | HierarchyNode] = []
 
         for transcript_batch in self._fetch_transcripts(start, end):
             for transcript in transcript_batch:

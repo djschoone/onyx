@@ -1,8 +1,7 @@
-import { usePopup } from "@/components/admin/connectors/Popup";
-import { EditIcon } from "@/components/icons/icons";
+import { SvgEdit } from "@opal/icons";
 import { useEffect, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import IconButton from "@/refresh-components/buttons/IconButton";
 import { SvgCheck, SvgX } from "@opal/icons";
 interface EditableStringFieldDisplayProps {
@@ -23,7 +22,6 @@ export function EditableStringFieldDisplay({
   const [isEditing, setIsEditing] = useState(false);
   const [editableValue, setEditableValue] = useState(value);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
-  const { popup, setPopup } = usePopup();
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -73,8 +71,6 @@ export function EditableStringFieldDisplay({
 
   return (
     <div ref={containerRef} className={"flex items-center"}>
-      {popup}
-
       <Input
         ref={inputRef as React.RefObject<HTMLInputElement>}
         type="text"
@@ -105,12 +101,14 @@ export function EditableStringFieldDisplay({
       {isEditing && isEditable ? (
         <>
           <div className={cn("flex", "flex-row")}>
+            {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
             <IconButton
               onClick={handleUpdate}
               internal
               className="ml-2"
               icon={SvgCheck}
             />
+            {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
             <IconButton
               onClick={resetEditing}
               internal
@@ -126,7 +124,7 @@ export function EditableStringFieldDisplay({
           style={{ fontSize: `${scale}rem` }}
         >
           {isEditable && (
-            <EditIcon className={`visible ml-2`} size={12 * scale} />
+            <SvgEdit className={`visible ml-2`} size={12 * scale} />
           )}
         </h1>
       )}

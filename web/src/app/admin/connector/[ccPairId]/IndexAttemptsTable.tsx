@@ -9,7 +9,7 @@ import {
   TableCell,
   TableHeader,
 } from "@/components/ui/table";
-import Text from "@/components/ui/text";
+import { Text } from "@opal/components";
 import { Callout } from "@/components/ui/callout";
 import { CCPairFullInfo } from "./types";
 import { IndexAttemptSnapshot } from "@/lib/types";
@@ -17,9 +17,9 @@ import { IndexAttemptStatus } from "@/components/Status";
 import { PageSelector } from "@/components/PageSelector";
 import { localizeAndPrettify } from "@/lib/time";
 import { getDocsProcessedPerMinute } from "@/lib/indexAttempt";
-import { InfoIcon } from "@/components/icons/icons";
-import ExceptionTraceModal from "@/components/modals/ExceptionTraceModal";
-import SimpleTooltip from "@/refresh-components/SimpleTooltip";
+import { SvgInfo } from "@opal/icons";
+import ExceptionTraceModal from "@/sections/modals/PreviewModal/ExceptionTraceModal";
+import { Tooltip } from "@opal/components";
 import { SvgClock } from "@opal/icons";
 export interface IndexingAttemptsTableProps {
   ccPair: CCPairFullInfo;
@@ -72,15 +72,15 @@ export function IndexAttemptsTable({
             <TableHead>Status</TableHead>
             <TableHead className="whitespace-nowrap">New Docs</TableHead>
             <TableHead>
-              <SimpleTooltip
+              <Tooltip
                 tooltip="Total number of documents replaced in the index during this indexing attempt"
                 side="top"
               >
                 <span className="flex items-center">
                   Total Docs
-                  <InfoIcon className="ml-1 w-4 h-4" />
+                  <SvgInfo className="ml-1 w-4 h-4" />
                 </span>
-              </SimpleTooltip>
+              </Tooltip>
             </TableHead>
             <TableHead>Error Message</TableHead>
           </TableRow>
@@ -98,7 +98,14 @@ export function IndexAttemptsTable({
               isReindexInProgress ? "are being" : "were"
             } synced into the system.`;
             return (
-              <TableRow key={indexAttempt.id}>
+              <TableRow
+                key={indexAttempt.id}
+                className={
+                  indexAttempt.full_exception_trace
+                    ? "hover:bg-accent-background cursor-pointer relative select-none"
+                    : undefined
+                }
+              >
                 <TableCell>
                   {indexAttempt.time_started
                     ? localizeAndPrettify(indexAttempt.time_started)
@@ -137,55 +144,46 @@ export function IndexAttemptsTable({
                   <div className="flex items-center">
                     {indexAttempt.total_docs_indexed}
                     {indexAttempt.from_beginning && (
-                      <SimpleTooltip side="top" tooltip={reindexTooltip}>
+                      <Tooltip side="top" tooltip={reindexTooltip}>
                         <span className="cursor-help flex items-center">
                           <SvgClock className="ml-2 h-3.5 w-3.5 stroke-current" />
                         </span>
-                      </SimpleTooltip>
+                      </Tooltip>
                     )}
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div>
-                    {indexAttempt.status === "success" && (
-                      <Text className="flex flex-wrap whitespace-normal">
-                        {"-"}
-                      </Text>
-                    )}
+                  {indexAttempt.status === "success" && <Text as="p">-</Text>}
 
-                    {indexAttempt.status === "failed" &&
-                      indexAttempt.error_msg && (
-                        <Text className="flex flex-wrap whitespace-normal">
-                          {indexAttempt.error_msg}
-                        </Text>
-                      )}
-
-                    {indexAttempt.full_exception_trace && (
-                      <div
-                        onClick={() => {
-                          setIndexAttemptTracePopupId(indexAttempt.id);
-                        }}
-                        className="mt-2 text-link cursor-pointer select-none"
-                      >
-                        View Full Trace
-                      </div>
+                  {indexAttempt.status === "failed" &&
+                    indexAttempt.error_msg && (
+                      <Text as="p">{indexAttempt.error_msg}</Text>
                     )}
-                  </div>
                 </TableCell>
+                <td className="w-0 p-0">
+                  {indexAttempt.full_exception_trace && (
+                    <button
+                      type="button"
+                      aria-label="View full trace"
+                      onClick={() =>
+                        setIndexAttemptTracePopupId(indexAttempt.id)
+                      }
+                      className="absolute w-full h-full left-0 top-0"
+                    />
+                  )}
+                </td>
               </TableRow>
             );
           })}
         </TableBody>
       </Table>
       {totalPages > 1 && (
-        <div className="mt-3 flex">
-          <div className="mx-auto">
-            <PageSelector
-              totalPages={totalPages}
-              currentPage={currentPage}
-              onPageChange={onPageChange}
-            />
-          </div>
+        <div className="flex flex-1 justify-center pt-3">
+          <PageSelector
+            totalPages={totalPages}
+            currentPage={currentPage}
+            onPageChange={onPageChange}
+          />
         </div>
       )}
     </>

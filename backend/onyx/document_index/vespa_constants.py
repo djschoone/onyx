@@ -58,6 +58,7 @@ DOCUMENT_SETS = "document_sets"
 USER_FILE = "user_file"
 USER_FOLDER = "user_folder"
 USER_PROJECT = "user_project"
+PERSONAS = "personas"
 LARGE_CHUNK_REFERENCE_IDS = "large_chunk_reference_ids"
 METADATA = "metadata"
 METADATA_LIST = "metadata_list"
@@ -76,6 +77,8 @@ IMAGE_FILE_NAME = "image_file_name"
 
 # Specific to Vespa, needed for highlighting matching keywords / section
 CONTENT_SUMMARY = "content_summary"
+
+FULL_CHUNK_EMBEDDING_KEY = "full_chunk"
 
 
 YQL_BASE = (

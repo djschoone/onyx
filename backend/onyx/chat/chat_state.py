@@ -1,19 +1,33 @@
 import threading
-import time
 from collections.abc import Callable
-from collections.abc import Generator
-from queue import Empty
-from typing import Any
+from dataclasses import dataclass
+from uuid import UUID
 
+from pydantic import BaseModel
+
+from onyx.cache.interface import CacheBackend
 from onyx.chat.citation_processor import CitationMapping
-from onyx.chat.emitter import Emitter
-from onyx.server.query_and_chat.placement import Placement
-from onyx.server.query_and_chat.streaming_models import OverallStop
-from onyx.server.query_and_chat.streaming_models import Packet
-from onyx.server.query_and_chat.streaming_models import PacketException
+from onyx.chat.models import ChatLoadedFile
+from onyx.chat.models import ChatMessageSimple
+from onyx.chat.models import ExtractedContextFiles
+from onyx.chat.models import FileToolMetadata
+from onyx.chat.models import SearchParams
+from onyx.context.search.models import SearchDoc
+from onyx.db.memory import UserMemoryContext
+from onyx.db.models import ChatMessage
+from onyx.db.models import ChatSession
+from onyx.db.models import Persona
+from onyx.llm.interfaces import LLM
+from onyx.llm.interfaces import LLMUserIdentity
+from onyx.onyxbot.slack.models import SlackContext
+from onyx.server.query_and_chat.models import SendMessageRequest
+from onyx.tools.models import ChatFile
 from onyx.tools.models import ToolCallInfo
-from onyx.utils.threadpool_concurrency import run_in_background
-from onyx.utils.threadpool_concurrency import wait_on_background
+
+# Type alias for search doc deduplication key
+# Simple key: just document_id (str)
+# Full key: (document_id, chunk_ind, match_highlights)
+SearchDocKey = str | tuple[str, int, tuple[str, ...]]
 
 
 class ChatStateContainer:
@@ -39,7 +53,13 @@ class ChatStateContainer:
         self.citation_to_doc: CitationMapping = {}
         # True if this turn is a clarification question (deep research flow)
         self.is_clarification: bool = False
+        # Pre-answer processing time (time before answer starts) in seconds
+        self.pre_answer_processing_time: float | None = None
         # Note: LLM cost tracking is now handled in multi_llm.py
+        # Search doc collection - maps dedup key to SearchDoc for all docs from tool calls
+        self._all_search_docs: dict[SearchDocKey, SearchDoc] = {}
+        # Track which citation numbers were actually emitted during streaming
+        self._emitted_citations: set[int] = set()
 
     def add_tool_call(self, tool_call: ToolCallInfo) -> None:
         """Add a tool call to the accumulated state."""
@@ -91,108 +111,104 @@ class ChatStateContainer:
         with self._lock:
             return self.is_clarification
 
+    def set_pre_answer_processing_time(self, duration: float | None) -> None:
+        """Set the pre-answer processing time (time before answer starts)."""
+        with self._lock:
+            self.pre_answer_processing_time = duration
 
-def run_chat_loop_with_state_containers(
-    func: Callable[..., None],
-    is_connected: Callable[[], bool],
-    emitter: Emitter,
-    state_container: ChatStateContainer,
-    *args: Any,
-    **kwargs: Any,
-) -> Generator[Packet, None]:
-    """
-    Explicit wrapper function that runs a function in a background thread
-    with event streaming capabilities.
+    def get_pre_answer_processing_time(self) -> float | None:
+        """Thread-safe getter for pre_answer_processing_time."""
+        with self._lock:
+            return self.pre_answer_processing_time
 
-    The wrapped function should accept emitter as first arg and use it to emit
-    Packet objects. This wrapper polls every 300ms to check if stop signal is set.
+    @staticmethod
+    def create_search_doc_key(
+        search_doc: SearchDoc, use_simple_key: bool = True
+    ) -> SearchDocKey:
+        """Create a unique key for a SearchDoc for deduplication.
 
-    Args:
-        func: The function to wrap (should accept emitter and state_container as first and second args)
-        emitter: Emitter instance for sending packets
-        state_container: ChatStateContainer instance for accumulating state
-        is_connected: Callable that returns False when stop signal is set
-        *args: Additional positional arguments for func
-        **kwargs: Additional keyword arguments for func
+        Args:
+            search_doc: The SearchDoc to create a key for
+            use_simple_key: If True (default), use only document_id for deduplication.
+                If False, include chunk_ind and match_highlights so that the same
+                document/chunk with different highlights are stored separately.
+        """
+        if use_simple_key:
+            return search_doc.document_id
+        match_highlights_tuple = tuple(sorted(search_doc.match_highlights or []))
+        return (search_doc.document_id, search_doc.chunk_ind, match_highlights_tuple)
 
-    Usage:
-        packets = run_chat_loop_with_state_containers(
-            my_func,
-            emitter=emitter,
-            state_container=state_container,
-            is_connected=check_func,
-            arg1, arg2, kwarg1=value1
-        )
-        for packet in packets:
-            # Process packets
-            pass
-    """
+    def add_search_docs(
+        self, search_docs: list[SearchDoc], use_simple_key: bool = True
+    ) -> None:
+        """Add search docs to the accumulated collection with deduplication.
 
-    def run_with_exception_capture() -> None:
-        try:
-            # Ensure state_container is passed explicitly, removing it from kwargs if present
-            kwargs_with_state = {**kwargs, "state_container": state_container}
-            func(emitter, *args, **kwargs_with_state)
-        except Exception as e:
-            # If execution fails, emit an exception packet
-            emitter.emit(
-                Packet(
-                    placement=Placement(turn_index=0),
-                    obj=PacketException(type="error", exception=e),
-                )
-            )
+        Args:
+            search_docs: List of SearchDoc objects to add
+            use_simple_key: If True (default), deduplicate by document_id only.
+                If False, deduplicate by document_id + chunk_ind + match_highlights.
+        """
+        with self._lock:
+            for doc in search_docs:
+                key = self.create_search_doc_key(doc, use_simple_key)
+                if key not in self._all_search_docs:
+                    self._all_search_docs[key] = doc
 
-    # Run the function in a background thread
-    thread = run_in_background(run_with_exception_capture)
+    def get_all_search_docs(self) -> dict[SearchDocKey, SearchDoc]:
+        """Thread-safe getter for all accumulated search docs (returns a copy)."""
+        with self._lock:
+            return self._all_search_docs.copy()
 
-    pkt: Packet | None = None
-    last_turn_index = 0  # Track the highest turn_index seen for stop packet
-    last_cancel_check = time.monotonic()
-    cancel_check_interval = 0.3  # Check for cancellation every 300ms
-    try:
-        while True:
-            # Poll queue with 300ms timeout for natural stop signal checking
-            # the 300ms timeout is to avoid busy-waiting and to allow the stop signal to be checked regularly
-            try:
-                pkt = emitter.bus.get(timeout=0.3)
-            except Empty:
-                if not is_connected():
-                    # Stop signal detected
-                    yield Packet(
-                        placement=Placement(turn_index=last_turn_index + 1),
-                        obj=OverallStop(type="stop", stop_reason="user_cancelled"),
-                    )
-                    break
-                last_cancel_check = time.monotonic()
-                continue
+    def add_emitted_citation(self, citation_num: int) -> None:
+        """Add a citation number that was actually emitted during streaming."""
+        with self._lock:
+            self._emitted_citations.add(citation_num)
 
-            if pkt is not None:
-                # Track the highest turn_index for the stop packet
-                if pkt.placement and pkt.placement.turn_index > last_turn_index:
-                    last_turn_index = pkt.placement.turn_index
+    def get_emitted_citations(self) -> set[int]:
+        """Thread-safe getter for emitted citations (returns a copy)."""
+        with self._lock:
+            return self._emitted_citations.copy()
 
-                if isinstance(pkt.obj, OverallStop):
-                    yield pkt
-                    break
-                elif isinstance(pkt.obj, PacketException):
-                    raise pkt.obj.exception
-                else:
-                    yield pkt
 
-                # Check for cancellation periodically even when packets are flowing
-                # This ensures stop signal is checked during active streaming
-                current_time = time.monotonic()
-                if current_time - last_cancel_check >= cancel_check_interval:
-                    if not is_connected():
-                        # Stop signal detected during streaming
-                        yield Packet(
-                            placement=Placement(turn_index=last_turn_index + 1),
-                            obj=OverallStop(type="stop", stop_reason="user_cancelled"),
-                        )
-                        break
-                    last_cancel_check = current_time
-    finally:
-        # Wait for thread to complete on normal exit to propagate exceptions and ensure cleanup.
-        # Skip waiting if user disconnected to exit quickly.
-        if is_connected():
-            wait_on_background(thread)
+class AvailableFiles(BaseModel):
+    """Separated file IDs for the FileReaderTool so it knows which loader to use."""
+
+    # IDs from the ``user_file`` table (project / persona-attached files).
+    user_file_ids: list[UUID] = []
+    # IDs from the ``file_record`` table (chat-attached files).
+    chat_file_ids: list[UUID] = []
+
+
+@dataclass(frozen=True)
+class ChatTurnSetup:
+    """Immutable context produced by ``build_chat_turn`` and consumed by ``_run_models``."""
+
+    new_msg_req: SendMessageRequest
+    chat_session: ChatSession
+    persona: Persona
+    user_message: ChatMessage
+    user_identity: LLMUserIdentity
+    llms: list[LLM]  # length 1 for single-model, N for multi-model
+    model_display_names: list[str]  # parallel to llms
+    simple_chat_history: list[ChatMessageSimple]
+    extracted_context_files: ExtractedContextFiles
+    reserved_messages: list[ChatMessage]  # length 1 for single, N for multi
+    reserved_token_count: int
+    search_params: SearchParams
+    all_injected_file_metadata: dict[str, FileToolMetadata]
+    available_files: AvailableFiles
+    tool_id_to_name_map: dict[int, str]
+    forced_tool_id: int | None
+    files: list[ChatLoadedFile]
+    chat_files_for_tools: list[ChatFile]
+    custom_agent_prompt: str | None
+    user_memory_context: UserMemoryContext
+    # For deep research: was the last assistant message a clarification request?
+    skip_clarification: bool
+    check_is_connected: Callable[[], bool]
+    cache: CacheBackend
+    # Execution params forwarded to per-model tool construction
+    bypass_acl: bool
+    slack_context: SlackContext | None
+    custom_tool_additional_headers: dict[str, str] | None
+    mcp_headers: dict[str, str] | None

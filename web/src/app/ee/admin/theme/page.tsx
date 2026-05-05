@@ -1,19 +1,22 @@
 "use client";
 
 import * as SettingsLayouts from "@/layouts/settings-layouts";
-import { SvgPaintBrush } from "@opal/icons";
-import Button from "@/refresh-components/buttons/Button";
+import { ADMIN_ROUTES } from "@/lib/admin-routes";
+import { Button } from "@opal/components";
 import {
   AppearanceThemeSettings,
   AppearanceThemeSettingsRef,
 } from "./AppearanceThemeSettings";
 import { useContext, useRef, useState } from "react";
-import { SettingsContext } from "@/components/settings/SettingsProvider";
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { SettingsContext } from "@/providers/SettingsProvider";
+import { toast } from "@/hooks/useToast";
 import { Formik, Form } from "formik";
 import * as Yup from "yup";
-import { EnterpriseSettings } from "@/app/admin/settings/interfaces";
-import { useRouter } from "next/navigation";
+import { EnterpriseSettings } from "@/interfaces/settings";
+import { mutate } from "swr";
+import { SWR_KEYS } from "@/lib/swr-keys";
+
+const route = ADMIN_ROUTES.THEME;
 
 const CHAR_LIMITS = {
   application_name: 50,
@@ -26,11 +29,10 @@ const CHAR_LIMITS = {
 };
 
 export default function ThemePage() {
-  const router = useRouter();
   const settings = useContext(SettingsContext);
   const [selectedLogo, setSelectedLogo] = useState<File | null>(null);
+  const [logoVersion, setLogoVersion] = useState(0);
   const appearanceSettingsRef = useRef<AppearanceThemeSettingsRef>(null);
-  const { popup, setPopup } = usePopup();
 
   if (!settings) {
     return null;
@@ -52,7 +54,7 @@ export default function ThemePage() {
       }),
     });
     if (response.ok) {
-      router.refresh();
+      await mutate(SWR_KEYS.enterpriseSettings);
       return true;
     } else {
       const errorMsg = (await response.json()).detail;
@@ -148,6 +150,8 @@ export default function ThemePage() {
       validationSchema={validationSchema}
       validateOnChange={false}
       onSubmit={async (values, formikHelpers) => {
+        let logoUploaded = false;
+
         // Handle logo upload if a new logo was selected
         if (selectedLogo) {
           const formData = new FormData();
@@ -164,6 +168,7 @@ export default function ThemePage() {
           }
           // Only clear the selected logo after a successful upload
           setSelectedLogo(null);
+          logoUploaded = true;
           values.use_custom_logo = true;
         }
 
@@ -191,10 +196,10 @@ export default function ThemePage() {
         // dirty comparisons reflect the newly-saved values.
         if (success) {
           formikHelpers.resetForm({ values });
-          setPopup({
-            type: "success",
-            message: "Appearance settings saved successfully!",
-          });
+          if (logoUploaded) {
+            setLogoVersion((v) => v + 1);
+          }
+          toast.success("Appearance settings saved successfully!");
         }
 
         formikHelpers.setSubmitting(false);
@@ -213,16 +218,15 @@ export default function ThemePage() {
 
         return (
           <Form className="w-full h-full">
-            {popup}
             <SettingsLayouts.Root>
               <SettingsLayouts.Header
-                title="Appearance & Theming"
+                title={route.title}
                 description="Customize how the application appears to users across your organization."
-                icon={SvgPaintBrush}
+                icon={route.icon}
                 rightChildren={
                   <Button
-                    type="button"
                     disabled={isSubmitting || (!dirty && !hasLogoChange)}
+                    type="button"
                     onClick={async () => {
                       const errors = await validateForm();
                       if (Object.keys(errors).length > 0) {
@@ -242,6 +246,7 @@ export default function ThemePage() {
                   ref={appearanceSettingsRef}
                   selectedLogo={selectedLogo}
                   setSelectedLogo={setSelectedLogo}
+                  logoVersion={logoVersion}
                   charLimits={CHAR_LIMITS}
                 />
               </SettingsLayouts.Body>

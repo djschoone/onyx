@@ -11,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.exceptions import CredentialExpiredError
 from onyx.connectors.exceptions import InsufficientPermissionsError
@@ -21,11 +22,11 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.file_processing.html_utils import format_document_soup
 from onyx.utils.logger import setup_logger
 from onyx.utils.text_processing import remove_markdown_image_references
-
 
 logger = setup_logger()
 
@@ -154,6 +155,7 @@ class TestRailConnector(LoadConnector, PollConnector):
                 url,
                 auth=(self.username, self.api_key),
                 params=params,
+                timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
@@ -348,7 +350,7 @@ class TestRailConnector(LoadConnector, PollConnector):
             if len(cases) < limit:
                 break
 
-    def _build_case_link(self, project_id: int, case_id: int) -> str:
+    def _build_case_link(self, project_id: int, case_id: int) -> str:  # noqa: ARG002
         # Standard UI link to a case
         return f"{self.base_url}/index.php?/cases/view/{case_id}"
 
@@ -356,7 +358,7 @@ class TestRailConnector(LoadConnector, PollConnector):
         self,
         project: dict[str, Any],
         case: dict[str, Any],
-        suite: dict[str, Any] | None = None,
+        suite: dict[str, Any] | None = None,  # noqa: ARG002
     ) -> Document | None:
         project_id = project.get("id")
         if not isinstance(project_id, int):
@@ -419,8 +421,12 @@ class TestRailConnector(LoadConnector, PollConnector):
         if isinstance(steps_separated, list) and steps_separated:
             rendered_steps: list[str] = []
             for idx, step_item in enumerate(steps_separated, start=1):
-                step_content = self._sanitize_rich_text(step_item.get("content"))
-                step_expected = self._sanitize_rich_text(step_item.get("expected"))
+                step_content = self._sanitize_rich_text(
+                    step_item.get("content")  # ty: ignore[unresolved-attribute]
+                )
+                step_expected = self._sanitize_rich_text(
+                    step_item.get("expected")  # ty: ignore[unresolved-attribute]
+                )
                 parts: list[str] = []
                 if step_content:
                     parts.append(f"Step {idx}: {step_content}")
@@ -478,7 +484,7 @@ class TestRailConnector(LoadConnector, PollConnector):
         if not self.base_url or not self.username or not self.api_key:
             raise ConnectorMissingCredentialError("testrail")
 
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
 
         projects = self._list_projects()
         project_filter: list[int] | None = self.project_ids
@@ -532,11 +538,9 @@ class TestRailConnector(LoadConnector, PollConnector):
 
 
 if __name__ == "__main__":
-    from onyx.configs.app_configs import (
-        TESTRAIL_API_KEY,
-        TESTRAIL_BASE_URL,
-        TESTRAIL_USERNAME,
-    )
+    from onyx.configs.app_configs import TESTRAIL_API_KEY
+    from onyx.configs.app_configs import TESTRAIL_BASE_URL
+    from onyx.configs.app_configs import TESTRAIL_USERNAME
 
     connector = TestRailConnector()
 

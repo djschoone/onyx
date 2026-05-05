@@ -1,10 +1,10 @@
 "use client";
 
-import { cn } from "@/lib/utils";
+import { cn } from "@opal/utils";
 import type { IconProps } from "@opal/types";
 import Text from "@/refresh-components/texts/Text";
 import Image from "next/image";
-import { DEFAULT_AGENT_AVATAR_SIZE_PX } from "@/lib/constants";
+import { DEFAULT_AVATAR_SIZE_PX } from "@/lib/constants";
 import {
   SvgActivitySmall,
   SvgAudioEqSmall,
@@ -96,7 +96,7 @@ export default function CustomAgentAvatar({
   src,
   iconName,
 
-  size = DEFAULT_AGENT_AVATAR_SIZE_PX,
+  size = DEFAULT_AVATAR_SIZE_PX,
 }: CustomAgentAvatarProps) {
   if (src) {
     return (
@@ -139,9 +139,7 @@ export default function CustomAgentAvatar({
   if (validFirstLetter) {
     return (
       <SvgOctagonWrapper size={size}>
-        <Text as="span" style={{ fontSize: size * 0.5 }}>
-          {firstLetter}
-        </Text>
+        <Text style={{ fontSize: size * 0.5 }}>{firstLetter}</Text>
       </SvgOctagonWrapper>
     );
   }

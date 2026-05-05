@@ -4,18 +4,17 @@ import React, { useRef, useState } from "react";
 import Modal from "@/refresh-components/Modal";
 import { Callout } from "@/components/ui/callout";
 import Text from "@/refresh-components/texts/Text";
-import Separator from "@/refresh-components/Separator";
+import { Divider } from "@opal/components";
 import Button from "@/refresh-components/buttons/Button";
 import { Label } from "@/components/Field";
 import {
   CloudEmbeddingProvider,
   getFormattedProviderName,
 } from "@/components/embedding/interfaces";
-import {
-  EMBEDDING_PROVIDERS_ADMIN_URL,
-  LLM_PROVIDERS_ADMIN_URL,
-} from "@/app/admin/configuration/llm/constants";
+import { EMBEDDING_PROVIDERS_ADMIN_URL } from "@/lib/llmConfig/constants";
+import { markdown } from "@opal/utils";
 import { mutate } from "swr";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import { testEmbedding } from "@/app/admin/embeddings/pages/utils";
 import { SvgSettings } from "@opal/icons";
 
@@ -102,7 +101,7 @@ export default function ChangeCredentialsModal({
         return;
       }
 
-      mutate(LLM_PROVIDERS_ADMIN_URL);
+      mutate(SWR_KEYS.adminLlmProviders);
       onDeleted();
     } catch (error) {
       setDeletionError(
@@ -174,9 +173,11 @@ export default function ChangeCredentialsModal({
       <Modal.Content>
         <Modal.Header
           icon={SvgSettings}
-          title={`Modify your ${getFormattedProviderName(
-            provider.provider_type
-          )} ${isProxy ? "Configuration" : "key"}`}
+          title={markdown(
+            `Modify your *${getFormattedProviderName(
+              provider.provider_type
+            )}* ${isProxy ? "configuration" : "key"}`
+          )}
           onClose={onCancel}
         />
         <Modal.Body>
@@ -204,6 +205,7 @@ export default function ChangeCredentialsModal({
                 ) : (
                   <>
                     <input
+                      type="password"
                       className="border border-border rounded w-full py-2 px-3 bg-background-emphasis"
                       value={apiKey}
                       onChange={(e: any) => setApiKey(e.target.value)}
@@ -267,6 +269,7 @@ export default function ChangeCredentialsModal({
                   </Callout>
                 )}
 
+                {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
                 <Button
                   className="mr-auto mt-4"
                   onClick={() => handleSubmit()}
@@ -275,7 +278,7 @@ export default function ChangeCredentialsModal({
                   Update Configuration
                 </Button>
 
-                <Separator />
+                <Divider />
               </div>
             </>
           )}
@@ -288,6 +291,7 @@ export default function ChangeCredentialsModal({
             embedding type!
           </Text>
 
+          {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
           <Button className="mr-auto" onClick={handleDelete} danger>
             Delete Configuration
           </Button>

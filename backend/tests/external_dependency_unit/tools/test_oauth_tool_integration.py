@@ -8,6 +8,7 @@ Tests the priority logic for OAuth tokens when constructing custom tools:
 All external HTTP calls are mocked, but Postgres and Redis are running.
 """
 
+import queue
 from typing import Any
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -16,8 +17,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.orm import Session
 
-from onyx.chat.emitter import get_default_emitter
-from onyx.context.search.enums import RecencyBiasSetting
+from onyx.chat.emitter import Emitter
 from onyx.db.models import OAuthAccount
 from onyx.db.models import OAuthConfig
 from onyx.db.models import Persona
@@ -31,7 +31,6 @@ from onyx.tools.tool_constructor import SearchToolConfig
 from onyx.tools.tool_implementations.custom.custom_tool import CustomTool
 from tests.external_dependency_unit.answer.conftest import ensure_default_llm_provider
 from tests.external_dependency_unit.conftest import create_test_user
-
 
 # Simple OpenAPI schema for testing
 SIMPLE_OPENAPI_SCHEMA: dict[str, Any] = {
@@ -57,19 +56,13 @@ def _create_test_persona(db_session: Session, user: User, tools: list[Tool]) -> 
     persona = Persona(
         name=f"Test Persona {uuid4().hex[:8]}",
         description="Test persona",
-        num_chunks=10.0,
-        chunks_above=0,
-        chunks_below=0,
-        llm_relevance_filter=False,
-        llm_filter_extraction=False,
-        recency_bias=RecencyBiasSetting.NO_DECAY,
         system_prompt="You are a helpful assistant",
         task_prompt="Answer the user's question",
         tools=tools,
         document_sets=[],
         users=[user],
         groups=[],
-        is_visible=True,
+        is_listed=True,
         is_public=True,
         display_priority=None,
         starter_messages=None,
@@ -181,7 +174,7 @@ class TestOAuthToolIntegrationPriority:
         tool_dict = construct_tools(
             persona=persona,
             db_session=db_session,
-            emitter=get_default_emitter(),
+            emitter=Emitter(merged_queue=queue.Queue()),
             user=user,
             llm=llm,
             search_tool_config=search_tool_config,
@@ -239,7 +232,7 @@ class TestOAuthToolIntegrationPriority:
         tool_dict = construct_tools(
             persona=persona,
             db_session=db_session,
-            emitter=get_default_emitter(),
+            emitter=Emitter(merged_queue=queue.Queue()),
             user=user,
             llm=llm,
         )
@@ -291,7 +284,7 @@ class TestOAuthToolIntegrationPriority:
             tool_dict = construct_tools(
                 persona=persona,
                 db_session=db_session,
-                emitter=get_default_emitter(),
+                emitter=Emitter(merged_queue=queue.Queue()),
                 user=user,
                 llm=llm,
             )
@@ -352,7 +345,7 @@ class TestOAuthToolIntegrationPriority:
         tool_dict = construct_tools(
             persona=persona,
             db_session=db_session,
-            emitter=get_default_emitter(),
+            emitter=Emitter(merged_queue=queue.Queue()),
             user=user,
             llm=llm,
         )
@@ -423,7 +416,7 @@ class TestOAuthToolIntegrationPriority:
             tool_dict = construct_tools(
                 persona=persona,
                 db_session=db_session,
-                emitter=get_default_emitter(),
+                emitter=Emitter(merged_queue=queue.Queue()),
                 user=user,
                 llm=llm,
             )
@@ -490,7 +483,7 @@ class TestOAuthToolIntegrationPriority:
         tool_dict = construct_tools(
             persona=persona,
             db_session=db_session,
-            emitter=get_default_emitter(),
+            emitter=Emitter(merged_queue=queue.Queue()),
             user=user,
             llm=llm,
         )
@@ -543,7 +536,7 @@ class TestOAuthToolIntegrationPriority:
         tool_dict = construct_tools(
             persona=persona,
             db_session=db_session,
-            emitter=get_default_emitter(),
+            emitter=Emitter(merged_queue=queue.Queue()),
             user=user,
             llm=llm,
         )

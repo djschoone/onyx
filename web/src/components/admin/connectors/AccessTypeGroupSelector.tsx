@@ -2,8 +2,7 @@ import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidE
 import React, { useState, useEffect } from "react";
 import { FieldArray, ArrayHelpers, ErrorMessage, useField } from "formik";
 import Text from "@/refresh-components/texts/Text";
-import Button from "@/refresh-components/buttons/Button";
-import Separator from "@/refresh-components/Separator";
+import { Button, Divider } from "@opal/components";
 import { UserGroup, UserRole } from "@/lib/types";
 import { useUserGroups } from "@/lib/hooks";
 import {
@@ -12,7 +11,7 @@ import {
   ConfigurableSources,
   validAutoSyncSources,
 } from "@/lib/types";
-import { useUser } from "@/components/user/UserProvider";
+import { useUser } from "@/providers/UserProvider";
 import { SvgUsers } from "@opal/icons";
 function isValidAutoSyncSource(
   value: ConfigurableSources
@@ -108,7 +107,7 @@ export function AccessTypeGroupSelector({
         userGroups &&
         userGroups?.length > 0 && (
           <>
-            <Separator />
+            <Divider />
             <div className="flex flex-col gap-3 pt-4">
               <Text as="p" mainUiAction text05>
                 Assign group access for this Connector
@@ -136,10 +135,9 @@ export function AccessTypeGroupSelector({
                       let isSelected = ind !== -1;
                       return (
                         <Button
+                          variant={isSelected ? "action" : "default"}
                           key={userGroup.id}
-                          primary
-                          action={isSelected}
-                          leftIcon={SvgUsers}
+                          icon={SvgUsers}
                           onClick={() => {
                             if (isSelected) {
                               arrayHelpers.remove(ind);

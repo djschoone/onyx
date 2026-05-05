@@ -19,6 +19,7 @@ import {
 } from "@/lib/types";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
+import Truncated from "@/refresh-components/texts/Truncated";
 import {
   FiChevronDown,
   FiChevronRight,
@@ -26,14 +27,14 @@ import {
   FiUnlock,
   FiRefreshCw,
 } from "react-icons/fi";
-import SimpleTooltip from "@/refresh-components/SimpleTooltip";
+import { Tooltip } from "@opal/components";
 import { SourceIcon } from "@/components/SourceIcon";
 import { getSourceDisplayName } from "@/lib/sources";
 import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidEnterpriseFeaturesEnabled";
 import { ConnectorCredentialPairStatus } from "../../connector/[ccPairId]/types";
 import { PageSelector } from "@/components/PageSelector";
 import { ConnectorStaggeredSkeleton } from "./ConnectorRowSkeleton";
-import IconButton from "@/refresh-components/buttons/IconButton";
+import { Button } from "@opal/components";
 import { SvgSettings } from "@opal/icons";
 
 // Helper to handle navigation with cmd/ctrl+click support
@@ -165,9 +166,7 @@ function ConnectorRow({
       onClick={handleRowClick}
     >
       <TableCell className="">
-        <p className="lg:w-[200px] xl:w-[400px] inline-block ellipsis truncate">
-          {ccPairsIndexingStatus.name}
-        </p>
+        <Truncated>{ccPairsIndexingStatus.name}</Truncated>
       </TableCell>
       <TableCell>
         {timeAgo(ccPairsIndexingStatus?.last_success) || "-"}
@@ -209,9 +208,9 @@ function ConnectorRow({
       <TableCell>{ccPairsIndexingStatus.docs_indexed}</TableCell>
       <TableCell>
         {isEditable && (
-          <SimpleTooltip tooltip="Manage Connector">
-            <IconButton icon={SvgSettings} tertiary />
-          </SimpleTooltip>
+          <Tooltip tooltip="Manage Connector">
+            <Button icon={SvgSettings} prominence="tertiary" />
+          </Tooltip>
         )}
       </TableCell>
     </TableRow>
@@ -246,9 +245,7 @@ function FederatedConnectorRow({
       onClick={handleRowClick}
     >
       <TableCell className="">
-        <p className="lg:w-[200px] xl:w-[400px] inline-block ellipsis truncate">
-          {federatedConnector.name}
-        </p>
+        <Truncated>{federatedConnector.name}</Truncated>
       </TableCell>
       <TableCell>N/A</TableCell>
       <TableCell>
@@ -263,9 +260,9 @@ function FederatedConnectorRow({
       )}
       <TableCell>N/A</TableCell>
       <TableCell>
-        <IconButton
+        <Button
           icon={SvgSettings}
-          tertiary
+          prominence="tertiary"
           onClick={(e: React.MouseEvent) => {
             e.stopPropagation();
             navigateWithModifier(e, federatedUrl, router);
@@ -293,7 +290,7 @@ export function CCPairIndexingStatusTable({
   const isPaidEnterpriseFeaturesEnabled = usePaidEnterpriseFeaturesEnabled();
 
   return (
-    <Table className="-mt-8">
+    <Table className="-mt-8 table-fixed">
       <TableHeader>
         <ConnectorRow
           invisible

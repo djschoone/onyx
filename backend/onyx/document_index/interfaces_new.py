@@ -1,6 +1,9 @@
 import abc
+from collections.abc import Iterable
+from typing import Self
 
 from pydantic import BaseModel
+from pydantic import model_validator
 
 from onyx.access.models import DocumentAccess
 from onyx.configs.constants import PUBLIC_DOC_PAT
@@ -8,6 +11,7 @@ from onyx.context.search.enums import QueryType
 from onyx.context.search.models import IndexFilters
 from onyx.context.search.models import InferenceChunk
 from onyx.db.enums import EmbeddingPrecision
+from onyx.document_index.opensearch.constants import DEFAULT_MAX_CHUNK_SIZE
 from onyx.indexing.models import DocMetadataAwareIndexChunk
 from shared_configs.model_server_models import Embedding
 
@@ -37,6 +41,30 @@ __all__ = [
 ]
 
 
+class TenantState(BaseModel):
+    """
+    Captures the tenant-related state for an instance of DocumentIndex.
+
+    NOTE: Tenant ID must be set in multitenant mode.
+    """
+
+    model_config = {"frozen": True}
+
+    tenant_id: str
+    multitenant: bool
+
+    def __str__(self) -> str:
+        return (
+            f"TenantState(tenant_id={self.tenant_id}, multitenant={self.multitenant})"
+        )
+
+    @model_validator(mode="after")
+    def check_tenant_id_is_set_in_multitenant_mode(self) -> Self:
+        if self.multitenant and not self.tenant_id:
+            raise ValueError("Bug: Tenant ID must be set in multitenant mode.")
+        return self
+
+
 class DocumentInsertionRecord(BaseModel):
     """
     Result of indexing a document.
@@ -61,6 +89,20 @@ class DocumentSectionRequest(BaseModel):
     document_id: str
     min_chunk_ind: int | None = None
     max_chunk_ind: int | None = None
+    # A given document can have multiple chunking strategies.
+    max_chunk_size: int = DEFAULT_MAX_CHUNK_SIZE
+
+    @model_validator(mode="after")
+    def check_chunk_index_range_is_valid(self) -> Self:
+        if (
+            self.min_chunk_ind is not None
+            and self.max_chunk_ind is not None
+            and self.min_chunk_ind > self.max_chunk_ind
+        ):
+            raise ValueError(
+                "Bug: Min chunk index must be less than or equal to max chunk index."
+            )
+        return self
 
 
 class IndexingMetadata(BaseModel):
@@ -107,6 +149,7 @@ class MetadataUpdateRequest(BaseModel):
     hidden: bool | None = None
     secondary_index_updated: bool | None = None
     project_ids: set[int] | None = None
+    persona_ids: set[int] | None = None
 
 
 class IndexRetrievalFilters(BaseModel):
@@ -131,9 +174,9 @@ class IndexRetrievalFilters(BaseModel):
 
 class SchemaVerifiable(abc.ABC):
     """
-    Class must implement document index schema verification. For example, verify that all of the
-    necessary attributes for indexing, querying, filtering, and fields to return from search are
-    all valid in the schema.
+    Class must implement document index schema verification. For example, verify
+    that all of the necessary attributes for indexing, querying, filtering, and
+    fields to return from search are all valid in the schema.
     """
 
     @abc.abstractmethod
@@ -143,13 +186,18 @@ class SchemaVerifiable(abc.ABC):
         embedding_precision: EmbeddingPrecision,
     ) -> None:
         """
-        Verify that the document index exists and is consistent with the expectations in the code. For certain search
-        engines, the schema needs to be created before indexing can happen. This call should create the schema if it
-        does not exist.
+        Verifies that the document index exists and is consistent with the
+        expectations in the code.
 
-        Parameters:
-        - embedding_dim: Vector dimensionality for the vector similarity part of the search
-        - embedding_precision: Precision of the vector similarity part of the search
+        For certain search engines, the schema needs to be created before
+        indexing can happen. This call should create the schema if it does not
+        exist.
+
+        Args:
+            embedding_dim: Vector dimensionality for the vector similarity part
+                of the search.
+            embedding_precision: Precision of the values of the vectors for the
+                similarity part of the search.
         """
         raise NotImplementedError
 
@@ -162,10 +210,10 @@ class Indexable(abc.ABC):
     @abc.abstractmethod
     def index(
         self,
-        chunks: list[DocMetadataAwareIndexChunk],
+        chunks: Iterable[DocMetadataAwareIndexChunk],
         indexing_metadata: IndexingMetadata,
     ) -> list[DocumentInsertionRecord]:
-        """Indexes a list of document chunks into the document index.
+        """Indexes an iterable of document chunks into the document index.
 
         This is often a batch operation including chunks from multiple
         documents.
@@ -186,9 +234,9 @@ class Indexable(abc.ABC):
                 cleaning / updating.
 
         Returns:
-            List of document IDs which map to unique documents and are used for
-            deduping chunks when updating, as well as if the document is newly
-            indexed or already existed and just updated.
+            List of document IDs which map to unique documents as well as if the
+                document is newly indexed or had already existed and was just
+                updated.
         """
         raise NotImplementedError
 
@@ -202,8 +250,8 @@ class Deletable(abc.ABC):
     @abc.abstractmethod
     def delete(
         self,
-        # TODO(andrei): Fine for now but this can probably be a batch operation that
-        # takes in a list of IDs.
+        # TODO(andrei): Fine for now but this can probably be a batch operation
+        # that takes in a list of IDs.
         document_id: str,
         chunk_count: int | None = None,
         # TODO(andrei): Shouldn't this also have some acl filtering at minimum?
@@ -211,6 +259,10 @@ class Deletable(abc.ABC):
         """
         Hard deletes all of the chunks for the corresponding document in the
         document index.
+
+        TODO(andrei): Not a pressing issue now but think about what we want the
+        contract of this method to be in the event the specified document ID
+        does not exist.
 
         Args:
             document_id: The unique identifier for the document as represented
@@ -242,15 +294,8 @@ class Updatable(abc.ABC):
     def update(
         self,
         update_requests: list[MetadataUpdateRequest],
-        # TODO(andrei), WARNING: Very temporary, this is not the interface we want
-        # in Updatable, we only have this to continue supporting
-        # user_file_docid_migration_task for Vespa which should be done soon.
-        old_doc_id_to_new_doc_id: dict[str, str],
     ) -> None:
-        """
-        Updates some set of chunks. The document and fields to update are specified in the update
-        requests. Each update request in the list applies its changes to a list of document ids.
-        None values mean that the field does not need an update.
+        """Updates some set of chunks.
 
         The document and fields to update are specified in the update requests.
         Each update request in the list applies its changes to a list of
@@ -280,6 +325,7 @@ class IdRetrievalCapable(abc.ABC):
         # TODO(andrei): This is temporary, we will not expose this in the long
         # run.
         batch_retrieval: bool = False,
+        # TODO(andrei): Add a param for whether to retrieve hidden docs.
     ) -> list[InferenceChunk]:
         """Fetches chunk(s) based on document ID.
 
@@ -309,12 +355,12 @@ class HybridCapable(abc.ABC):
         self,
         query: str,
         query_embedding: Embedding,
+        # TODO(andrei): This param is not great design, get rid of it.
         final_keywords: list[str] | None,
         query_type: QueryType,
         # TODO(andrei): Make this more strict w.r.t. acl, temporary for now.
         filters: IndexFilters,
         num_to_retrieve: int,
-        offset: int = 0,
     ) -> list[InferenceChunk]:
         """Runs hybrid search and returns a list of inference chunks.
 
@@ -330,8 +376,47 @@ class HybridCapable(abc.ABC):
             filters: Filters for things like permissions, source type, time,
                 etc.
             num_to_retrieve: Number of highest matching chunks to return.
-            offset: Number of highest matching chunks to initially skip (kind of
-                like pagination). Defaults to 0.
+
+        Returns:
+            Score-ranked (highest first) list of highest matching chunks.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def keyword_retrieval(
+        self,
+        query: str,
+        filters: IndexFilters,
+        num_to_retrieve: int,
+    ) -> list[InferenceChunk]:
+        """Runs keyword-only search and returns a list of inference chunks.
+
+        Args:
+            query: User query.
+            filters: Filters for things like permissions, source type, time,
+                etc.
+            num_to_retrieve: Number of highest matching chunks to return.
+
+        Returns:
+            Score-ranked (highest first) list of highest matching chunks.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def semantic_retrieval(
+        self,
+        query_embedding: Embedding,
+        filters: IndexFilters,
+        num_to_retrieve: int,
+    ) -> list[InferenceChunk]:
+        """Runs semantic-only search and returns a list of inference chunks.
+
+        Args:
+            query_embedding: Vector representation of the query. Must be of the
+                correct dimensionality for the primary index.
+            filters: Filters for things like permissions, source type, time,
+                etc.
+            num_to_retrieve: Number of highest matching chunks to return.
 
         Returns:
             Score-ranked (highest first) list of highest matching chunks.
@@ -342,8 +427,6 @@ class HybridCapable(abc.ABC):
 class RandomCapable(abc.ABC):
     """
     Class must implement random document retrieval.
-
-    This currently is just used for porting the documents to a secondary index.
     """
 
     @abc.abstractmethod
@@ -351,7 +434,7 @@ class RandomCapable(abc.ABC):
         self,
         # TODO(andrei): Make this more strict w.r.t. acl, temporary for now.
         filters: IndexFilters,
-        num_to_retrieve: int = 100,
+        num_to_retrieve: int = 10,
         dirty: bool | None = None,
     ) -> list[InferenceChunk]:
         """Retrieves random chunks matching the filters.
@@ -359,7 +442,7 @@ class RandomCapable(abc.ABC):
         Args:
             filters: Filters for things like permissions, source type, time,
                 etc.
-            num_to_retrieve: Number of chunks to retrieve. Defaults to 100.
+            num_to_retrieve: Number of chunks to retrieve. Defaults to 10.
             dirty: If set, retrieve chunks whose "dirty" flag matches this
                 argument. If None, there is no restriction on retrieved chunks
                 with respect to that flag. A chunk is considered dirty if there

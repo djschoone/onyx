@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from onyx.configs.app_configs import DISABLE_INDEX_UPDATE_ON_SWAP
 from onyx.configs.constants import CELERY_GENERIC_BEAT_LOCK_TIMEOUT
 from onyx.configs.constants import DocumentSource
-from onyx.db.connector_credential_pair import get_connector_credential_pair_from_id
 from onyx.db.engine.time_utils import get_db_current_time
 from onyx.db.enums import ConnectorCredentialPairStatus
 from onyx.db.enums import IndexingStatus
@@ -38,6 +37,7 @@ class IndexingCallbackBase(IndexingHeartbeatInterface):
         redis_connector: RedisConnector,
         redis_lock: RedisLock,
         redis_client: Redis,
+        timeout_seconds: int | None = None,
     ):
         super().__init__()
         self.parent_pid = parent_pid
@@ -52,13 +52,31 @@ class IndexingCallbackBase(IndexingHeartbeatInterface):
         self.last_lock_monotonic = time.monotonic()
 
         self.last_parent_check = time.monotonic()
+        self.start_monotonic = time.monotonic()
+        self.timeout_seconds = timeout_seconds
 
     def should_stop(self) -> bool:
         # Check if the associated indexing attempt has been cancelled
         # TODO: Pass index_attempt_id to the callback and check cancellation using the db
-        return bool(self.redis_connector.stop.fenced)
+        if bool(self.redis_connector.stop.fenced):
+            return True
 
-    def progress(self, tag: str, amount: int) -> None:
+        # Check if the task has exceeded its timeout
+        # NOTE: Celery's soft_time_limit does not work with thread pools,
+        # so we must enforce timeouts internally.
+        if self.timeout_seconds is not None:
+            elapsed = time.monotonic() - self.start_monotonic
+            if elapsed > self.timeout_seconds:
+                logger.warning(
+                    f"IndexingCallback Docprocessing - task timeout exceeded: "
+                    f"elapsed={elapsed:.0f}s timeout={self.timeout_seconds}s "
+                    f"cc_pair={self.redis_connector.cc_pair_id}"
+                )
+                return True
+
+        return False
+
+    def progress(self, tag: str, amount: int) -> None:  # noqa: ARG002
         """Amount isn't used yet."""
 
         # rkuo: this shouldn't be necessary yet because we spawn the process this runs inside
@@ -126,18 +144,9 @@ class IndexingCallback(IndexingHeartbeatInterface):
 
 
 def is_in_repeated_error_state(
-    cc_pair_id: int, search_settings_id: int, db_session: Session
+    cc_pair: ConnectorCredentialPair, search_settings_id: int, db_session: Session
 ) -> bool:
     """Checks if the cc pair / search setting combination is in a repeated error state."""
-    cc_pair = get_connector_credential_pair_from_id(
-        db_session=db_session,
-        cc_pair_id=cc_pair_id,
-    )
-    if not cc_pair:
-        raise RuntimeError(
-            f"is_in_repeated_error_state - could not find cc_pair with id={cc_pair_id}"
-        )
-
     # if the connector doesn't have a refresh_freq, a single failed attempt is enough
     number_of_failed_attempts_in_a_row_needed = (
         NUM_REPEAT_ERRORS_BEFORE_REPEATED_ERROR_STATE
@@ -146,7 +155,7 @@ def is_in_repeated_error_state(
     )
 
     most_recent_index_attempts = get_recent_attempts_for_cc_pair(
-        cc_pair_id=cc_pair_id,
+        cc_pair_id=cc_pair.id,
         search_settings_id=search_settings_id,
         limit=number_of_failed_attempts_in_a_row_needed,
         db_session=db_session,
@@ -180,7 +189,7 @@ def should_index(
         db_session=db_session,
     )
     all_recent_errored = is_in_repeated_error_state(
-        cc_pair_id=cc_pair.id,
+        cc_pair=cc_pair,
         search_settings_id=search_settings_instance.id,
         db_session=db_session,
     )

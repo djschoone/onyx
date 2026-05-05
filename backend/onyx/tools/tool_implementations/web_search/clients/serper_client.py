@@ -8,12 +8,8 @@ from fastapi import HTTPException
 from onyx.connectors.cross_connector_utils.miscellaneous_utils import time_str_to_utc
 from onyx.tools.tool_implementations.open_url.models import WebContent
 from onyx.tools.tool_implementations.open_url.models import WebContentProvider
-from onyx.tools.tool_implementations.web_search.models import (
-    WebSearchProvider,
-)
-from onyx.tools.tool_implementations.web_search.models import (
-    WebSearchResult,
-)
+from onyx.tools.tool_implementations.web_search.models import WebSearchProvider
+from onyx.tools.tool_implementations.web_search.models import WebSearchResult
 from onyx.utils.logger import setup_logger
 from onyx.utils.retry_wrapper import retry_builder
 
@@ -21,6 +17,9 @@ logger = setup_logger()
 
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 SERPER_CONTENTS_URL = "https://scrape.serper.dev"
+
+# 1 minute timeout for Serper API requests to prevent indefinite hangs
+SERPER_REQUEST_TIMEOUT_SECONDS = 60
 
 
 class SerperClient(WebSearchProvider, WebContentProvider):
@@ -42,23 +41,34 @@ class SerperClient(WebSearchProvider, WebContentProvider):
             SERPER_SEARCH_URL,
             headers=self.headers,
             data=json.dumps(payload),
+            timeout=SERPER_REQUEST_TIMEOUT_SECONDS,
         )
 
         response.raise_for_status()
 
         results = response.json()
-        organic_results = results["organic"]
+        organic_results = results.get("organic") or []
 
-        return [
-            WebSearchResult(
-                title=result["title"],
-                link=result["link"],
-                snippet=result["snippet"],
-                author=None,
-                published_date=None,
+        validated_results: list[WebSearchResult] = []
+        for result in organic_results:
+            link = (result.get("link") or "").strip()
+            if not link:
+                continue
+
+            title = (result.get("title") or "").strip()
+            snippet = (result.get("snippet") or "").strip()
+
+            validated_results.append(
+                WebSearchResult(
+                    title=title,
+                    link=link,
+                    snippet=snippet,
+                    author=None,
+                    published_date=None,
+                )
             )
-            for result in organic_results
-        ]
+
+        return validated_results
 
     def test_connection(self) -> dict[str, str]:
         try:
@@ -120,6 +130,7 @@ class SerperClient(WebSearchProvider, WebContentProvider):
             SERPER_CONTENTS_URL,
             headers=self.headers,
             data=json.dumps(payload),
+            timeout=SERPER_REQUEST_TIMEOUT_SECONDS,
         )
 
         # 400 returned when serper cannot scrape

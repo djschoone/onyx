@@ -6,6 +6,15 @@ if TYPE_CHECKING:
     from onyx.db.models import ImageGenerationConfig as ImageGenerationConfigModel
 
 
+def _mask_api_key(api_key: str | None) -> str | None:
+    """Mask API key, showing first 4 and last 4 characters."""
+    if not api_key:
+        return None
+    if len(api_key) <= 8:
+        return "****"
+    return api_key[:4] + "****" + api_key[-4:]
+
+
 class TestImageGenerationRequest(BaseModel):
     """Request model for testing image generation API key.
 
@@ -22,6 +31,9 @@ class TestImageGenerationRequest(BaseModel):
 
     # Option 2: Use API key from existing provider
     source_llm_provider_id: int | None = None
+
+    # Additional fields for custom config
+    custom_config: dict[str, str] | None = None
 
     # Additional fields for Azure
     api_base: str | None = None
@@ -54,6 +66,7 @@ class ImageGenerationConfigCreate(BaseModel):
     api_base: str | None = None
     api_version: str | None = None
     deployment_name: str | None = None
+    custom_config: dict[str, str] | None = None
 
     is_default: bool = False
 
@@ -78,6 +91,10 @@ class ImageGenerationConfigUpdate(BaseModel):
     api_base: str | None = None
     api_version: str | None = None
     deployment_name: str | None = None
+    custom_config: dict[str, str] | None = None
+
+    # If False and using new credentials mode, preserve existing API key from DB
+    api_key_changed: bool = False
 
 
 class ImageGenerationConfigView(BaseModel):
@@ -117,10 +134,17 @@ class ImageGenerationCredentials(BaseModel):
     def from_model(
         cls, config: "ImageGenerationConfigModel"
     ) -> "ImageGenerationCredentials":
-        """Convert database model to credentials model."""
+        """Convert database model to credentials model.
+
+        Note: API key is masked for security - only first 4 and last 4 chars shown.
+        """
         llm_provider = config.model_configuration.llm_provider
         return cls(
-            api_key=llm_provider.api_key,
+            api_key=_mask_api_key(
+                llm_provider.api_key.get_value(apply_mask=False)
+                if llm_provider.api_key
+                else None
+            ),
             api_base=llm_provider.api_base,
             api_version=llm_provider.api_version,
             deployment_name=llm_provider.deployment_name,
@@ -148,7 +172,11 @@ class DefaultImageGenerationConfig(BaseModel):
             model_configuration_id=config.model_configuration_id,
             model_name=config.model_configuration.name,
             provider=llm_provider.provider,
-            api_key=llm_provider.api_key,
+            api_key=(
+                llm_provider.api_key.get_value(apply_mask=False)
+                if llm_provider.api_key
+                else None
+            ),
             api_base=llm_provider.api_base,
             api_version=llm_provider.api_version,
             deployment_name=llm_provider.deployment_name,

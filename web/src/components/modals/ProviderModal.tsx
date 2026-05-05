@@ -1,5 +1,5 @@
 import React from "react";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import type { IconProps } from "@opal/types";
 import Modal from "@/refresh-components/Modal";
 import { SvgLoader } from "@opal/icons";
@@ -64,7 +64,7 @@ export default function ProviderModal({
 
   return (
     <Modal open={open} onOpenChange={handleOpenChange}>
-      <Modal.Content tall onKeyDown={handleKeyDown}>
+      <Modal.Content width="sm" height="lg" onKeyDown={handleKeyDown}>
         <Modal.Header
           icon={icon}
           title={title}
@@ -72,20 +72,22 @@ export default function ProviderModal({
           onClose={() => onOpenChange(false)}
         />
 
-        <Modal.Body className="flex-1 overflow-y-auto bg-background-tint-01">
-          {children}
-        </Modal.Body>
+        <Modal.Body>{children}</Modal.Body>
 
         {onSubmit && (
-          <Modal.Footer className="flex justify-end gap-2 p-4 ">
-            <Button type="button" secondary onClick={() => onOpenChange(false)}>
+          <Modal.Footer>
+            <Button
+              prominence="secondary"
+              type="button"
+              onClick={() => onOpenChange(false)}
+            >
               {cancelLabel}
             </Button>
             <Button
+              disabled={submitDisabled || isSubmitting}
               type="button"
               onClick={onSubmit}
-              disabled={submitDisabled || isSubmitting}
-              leftIcon={isSubmitting ? SpinningLoader : undefined}
+              icon={isSubmitting ? SpinningLoader : undefined}
             >
               {submitLabel}
             </Button>

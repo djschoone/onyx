@@ -1,19 +1,21 @@
 "use client";
 
-import { AuthTypeMetadata } from "@/lib/userSS";
+import { AuthTypeMetadata } from "@/hooks/useAuthTypeMetadata";
 import LoginText from "@/app/auth/login/LoginText";
 import SignInButton from "@/app/auth/login/SignInButton";
 import EmailPasswordForm from "./EmailPasswordForm";
 import { AuthType, NEXT_PUBLIC_FORGOT_PASSWORD_ENABLED } from "@/lib/constants";
 import { useSendAuthRequiredMessage } from "@/lib/extension/utils";
 import Text from "@/refresh-components/texts/Text";
-import Button from "@/refresh-components/buttons/Button";
+import { Button, MessageCard } from "@opal/components";
 
 interface LoginPageProps {
   authUrl: string | null;
   authTypeMetadata: AuthTypeMetadata | null;
   nextUrl: string | null;
   hidePageRedirect?: boolean;
+  verified?: boolean;
+  isFirstUser?: boolean;
 }
 
 export default function LoginPage({
@@ -21,11 +23,23 @@ export default function LoginPage({
   authTypeMetadata,
   nextUrl,
   hidePageRedirect,
+  verified,
+  isFirstUser,
 }: LoginPageProps) {
   useSendAuthRequiredMessage();
 
+  // Honor any existing nextUrl; only default to new team flow for first users with no nextUrl
+  const effectiveNextUrl =
+    nextUrl ?? (isFirstUser ? "/app?new_team=true" : null);
+
   return (
     <div className="flex flex-col w-full justify-center">
+      {verified && (
+        <MessageCard
+          variant="success"
+          title="Your email has been verified! Please sign in to continue."
+        />
+      )}
       {authUrl &&
         authTypeMetadata &&
         authTypeMetadata.authType !== AuthType.CLOUD &&
@@ -58,7 +72,7 @@ export default function LoginPage({
               </div>
             </>
           )}
-          <EmailPasswordForm shouldVerify={true} nextUrl={nextUrl} />
+          <EmailPasswordForm shouldVerify={true} nextUrl={effectiveNextUrl} />
           {NEXT_PUBLIC_FORGOT_PASSWORD_ENABLED && (
             <Button href="/auth/forgot-password">Reset Password</Button>
           )}
@@ -68,8 +82,7 @@ export default function LoginPage({
       {authTypeMetadata?.authType === AuthType.BASIC && (
         <div className="flex flex-col w-full gap-6">
           <LoginText />
-
-          <EmailPasswordForm nextUrl={nextUrl} />
+          <EmailPasswordForm nextUrl={effectiveNextUrl} />
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import { useState } from "react";
 import {
   Table,
@@ -15,7 +15,7 @@ import { numToDisplay } from "./constants";
 import { FiEye, FiEyeOff } from "react-icons/fi";
 import { getErrorMsg } from "@/lib/fetchUtils";
 import { HoverPopup } from "@/components/HoverPopup";
-import Checkbox from "@/refresh-components/inputs/Checkbox";
+import { Checkbox } from "@opal/components";
 import { ScoreSection } from "../ScoreEditor";
 import { truncateString } from "@/lib/utils";
 
@@ -90,7 +90,6 @@ export const DocumentFeedbackTable = ({
   refresh: () => void;
 }) => {
   const [page, setPage] = useState(1);
-  const { popup, setPopup } = usePopup();
 
   return (
     <div>
@@ -125,12 +124,11 @@ export const DocumentFeedbackTable = ({
                         if (response.ok) {
                           refresh();
                         } else {
-                          setPopup({
-                            message: `Error updating hidden status - ${getErrorMsg(
+                          toast.error(
+                            `Error updating hidden status - ${getErrorMsg(
                               response
-                            )}`,
-                            type: "error",
-                          });
+                            )}`
+                          );
                         }
                       }}
                     />
@@ -145,7 +143,6 @@ export const DocumentFeedbackTable = ({
                           documentId={document.document_id}
                           initialScore={document.boost}
                           refresh={refresh}
-                          setPopup={setPopup}
                         />
                       </div>
                     </div>

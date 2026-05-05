@@ -9,7 +9,10 @@ import pytest
 
 from onyx.configs.constants import BlobType
 from onyx.connectors.blob.connector import BlobStorageConnector
+from onyx.connectors.cross_connector_utils.tabular_section_utils import is_tabular_file
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
+from onyx.connectors.models import TabularSection
 from onyx.connectors.models import TextSection
 from onyx.file_processing.extract_file_text import get_file_ext
 from onyx.file_processing.file_types import OnyxFileExtensions
@@ -86,7 +89,8 @@ def blob_connector(request: pytest.FixtureRequest) -> BlobStorageConnector:
     "blob_connector", [(BlobType.S3, "onyx-connector-tests")], indirect=True
 )
 def test_blob_s3_connector(
-    mock_get_api_key: MagicMock, blob_connector: BlobStorageConnector
+    mock_get_api_key: MagicMock,  # noqa: ARG001
+    blob_connector: BlobStorageConnector,
 ) -> None:
     """
     Plain and document file types should be fully indexed.
@@ -101,21 +105,26 @@ def test_blob_s3_connector(
     document_batches = blob_connector.load_from_state()
     for doc_batch in document_batches:
         for doc in doc_batch:
+            if isinstance(doc, HierarchyNode):
+                continue
             all_docs.append(doc)
 
     assert len(all_docs) == 15
 
     for doc in all_docs:
         section = doc.sections[0]
-        assert isinstance(section, TextSection)
 
-        file_extension = get_file_ext(doc.semantic_identifier)
-        if file_extension in OnyxFileExtensions.TEXT_AND_DOCUMENT_EXTENSIONS:
+        if is_tabular_file(doc.semantic_identifier):
+            assert isinstance(section, TabularSection)
             assert len(section.text) > 0
             continue
 
-        # unknown extension
-        assert len(section.text) == 0
+        assert isinstance(section, TextSection)
+        file_extension = get_file_ext(doc.semantic_identifier)
+        if file_extension in OnyxFileExtensions.TEXT_AND_DOCUMENT_EXTENSIONS:
+            assert len(section.text) > 0
+        else:
+            assert len(section.text) == 0
 
 
 @patch(
@@ -126,7 +135,7 @@ def test_blob_s3_connector(
     "blob_connector", [(BlobType.S3, "s3-role-connector-test")], indirect=True
 )
 def test_blob_s3_cross_region_and_citation_link(
-    mock_get_api_key: MagicMock,
+    mock_get_api_key: MagicMock,  # noqa: ARG001
     blob_connector: BlobStorageConnector,
 ) -> None:
     """Buckets in a different region should be accessible and links should reflect the correct region.
@@ -141,7 +150,9 @@ def test_blob_s3_cross_region_and_citation_link(
     # Load documents and validate the single object + its link
     all_docs: list[Document] = []
     for doc_batch in blob_connector.load_from_state():
-        all_docs.extend(doc_batch)
+        all_docs.extend(
+            [doc for doc in doc_batch if not isinstance(doc, HierarchyNode)]
+        )
 
     # The test bucket contains exactly one object named "Chapter 6.pdf"
     assert len(all_docs) == 1
@@ -178,13 +189,16 @@ def test_blob_s3_cross_region_and_citation_link(
     "blob_connector", [(BlobType.R2, "asia-pacific-bucket")], indirect=True
 )
 def test_blob_r2_connector(
-    mock_get_api_key: MagicMock, blob_connector: BlobStorageConnector
+    mock_get_api_key: MagicMock,  # noqa: ARG001
+    blob_connector: BlobStorageConnector,
 ) -> None:
     """Validate basic R2 connector creation and document loading"""
 
     all_docs: list[Document] = []
     for doc_batch in blob_connector.load_from_state():
-        all_docs.extend(doc_batch)
+        all_docs.extend(
+            [doc for doc in doc_batch if not isinstance(doc, HierarchyNode)]
+        )
 
     assert len(all_docs) >= 1
     doc = all_docs[0]
@@ -201,13 +215,16 @@ def test_blob_r2_connector(
     indirect=True,
 )
 def test_blob_r2_eu_residency_connector(
-    mock_get_api_key: MagicMock, blob_connector: BlobStorageConnector
+    mock_get_api_key: MagicMock,  # noqa: ARG001
+    blob_connector: BlobStorageConnector,
 ) -> None:
     """Validate R2 connector with European residency setting"""
 
     all_docs: list[Document] = []
     for doc_batch in blob_connector.load_from_state():
-        all_docs.extend(doc_batch)
+        all_docs.extend(
+            [doc for doc in doc_batch if not isinstance(doc, HierarchyNode)]
+        )
 
     assert len(all_docs) >= 1
     doc = all_docs[0]
@@ -222,11 +239,14 @@ def test_blob_r2_eu_residency_connector(
     "blob_connector", [(BlobType.GOOGLE_CLOUD_STORAGE, "onyx-test-1")], indirect=True
 )
 def test_blob_gcs_connector(
-    mock_get_api_key: MagicMock, blob_connector: BlobStorageConnector
+    mock_get_api_key: MagicMock,  # noqa: ARG001
+    blob_connector: BlobStorageConnector,
 ) -> None:
     all_docs: list[Document] = []
     for doc_batch in blob_connector.load_from_state():
-        all_docs.extend(doc_batch)
+        all_docs.extend(
+            [doc for doc in doc_batch if not isinstance(doc, HierarchyNode)]
+        )
 
     # At least one object from the test bucket
     assert len(all_docs) >= 1

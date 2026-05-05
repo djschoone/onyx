@@ -1,7 +1,9 @@
 import random
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from logging import getLogger
+from uuid import UUID
 
 from onyx.configs.constants import MessageType
 from onyx.db.chat import create_chat_session
@@ -13,18 +15,26 @@ from onyx.db.models import ChatSession
 logger = getLogger(__name__)
 
 
-def seed_chat_history(num_sessions: int, num_messages: int, days: int) -> None:
+def seed_chat_history(
+    num_sessions: int,
+    num_messages: int,
+    days: int,
+    user_id: UUID | None = None,
+    persona_id: int | None = None,
+) -> None:
     """Utility function to seed chat history for testing.
 
     num_sessions: the number of sessions to seed
     num_messages: the number of messages to seed per sessions
     days: the number of days looking backwards from the current time over which to randomize
     the times.
+    user_id: optional user to associate with sessions
+    persona_id: optional persona/assistant to associate with sessions
     """
     with get_session_with_current_tenant() as db_session:
         logger.info(f"Seeding {num_sessions} sessions.")
         for y in range(0, num_sessions):
-            create_chat_session(db_session, f"pytest_session_{y}", None, None)
+            create_chat_session(db_session, f"pytest_session_{y}", user_id, persona_id)
 
         # randomize all session times
         logger.info(f"Seeding {num_messages} messages per session.")
@@ -34,7 +44,7 @@ def seed_chat_history(num_sessions: int, num_messages: int, days: int) -> None:
                 logger.info(f"Seeded messages for {x} sessions so far.")
 
             row = rows[x]
-            row.time_created = datetime.utcnow() - timedelta(
+            row.time_created = datetime.now(tz=timezone.utc) - timedelta(
                 days=random.randint(0, days)
             )
             row.time_updated = row.time_created + timedelta(
@@ -64,6 +74,9 @@ def seed_chat_history(num_sessions: int, num_messages: int, days: int) -> None:
                 chat_message.time_sent = row.time_created + timedelta(
                     minutes=random.randint(0, 10)
                 )
+
+                if current_message_type == MessageType.ASSISTANT:
+                    chat_message.model_display_name = "pytest-model"
 
                 db_session.commit()
 

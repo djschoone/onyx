@@ -3,7 +3,6 @@ import contextvars
 from shared_configs.configs import MULTI_TENANT
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
 
-
 # Context variable for the current tenant id
 CURRENT_TENANT_ID_CONTEXTVAR: contextvars.ContextVar[str | None] = (
     contextvars.ContextVar(
@@ -25,6 +24,12 @@ ONYX_REQUEST_ID_CONTEXTVAR: contextvars.ContextVar[str | None] = contextvars.Con
 INDEX_ATTEMPT_INFO_CONTEXTVAR: contextvars.ContextVar[tuple[int, int] | None] = (
     contextvars.ContextVar("index_attempt_info", default=None)
 )
+
+# Set by endpoint context middleware — used for per-endpoint DB pool attribution
+CURRENT_ENDPOINT_CONTEXTVAR: contextvars.ContextVar[str | None] = (
+    contextvars.ContextVar("current_endpoint", default=None)
+)
+
 
 """Utils related to contextvars"""
 

@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any
 from onyx.db.engine.iam_auth import get_iam_auth_token
 from onyx.configs.app_configs import USE_IAM_AUTH
 from onyx.configs.app_configs import POSTGRES_HOST
@@ -19,15 +19,17 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.sql.schema import SchemaItem
 from onyx.configs.constants import SSL_CERT_FILE
 from shared_configs.configs import (
     MULTI_TENANT,
     POSTGRES_DEFAULT_SCHEMA,
     TENANT_ID_PREFIX,
 )
+from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 from onyx.db.models import Base
-from celery.backends.database.session import ResultModelBase  # type: ignore
+from celery.backends.database.session import (  # ty: ignore[unresolved-import]
+    ResultModelBase,
+)
 from onyx.db.engine.sql_engine import SqlEngine
 
 # Make sure in alembic.ini [logger_root] level=INFO is set or most logging will be
@@ -45,8 +47,6 @@ if config.config_file_name is not None and config.attributes.get(
 
 target_metadata = [Base.metadata, ResultModelBase.metadata]
 
-EXCLUDE_TABLES = {"kombu_queue", "kombu_message"}
-
 logger = logging.getLogger(__name__)
 
 ssl_context: ssl.SSLContext | None = None
@@ -54,25 +54,6 @@ if USE_IAM_AUTH:
     if not os.path.exists(SSL_CERT_FILE):
         raise FileNotFoundError(f"Expected {SSL_CERT_FILE} when USE_IAM_AUTH is true.")
     ssl_context = ssl.create_default_context(cafile=SSL_CERT_FILE)
-
-
-def include_object(
-    object: SchemaItem,
-    name: str | None,
-    type_: Literal[
-        "schema",
-        "table",
-        "column",
-        "index",
-        "unique_constraint",
-        "foreign_key_constraint",
-    ],
-    reflected: bool,
-    compare_to: SchemaItem | None,
-) -> bool:
-    if type_ == "table" and name in EXCLUDE_TABLES:
-        return False
-    return True
 
 
 def filter_tenants_by_range(
@@ -225,14 +206,12 @@ def do_run_migrations(
 ) -> None:
     if create_schema:
         connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
-        connection.execute(text("COMMIT"))
 
     connection.execute(text(f'SET search_path TO "{schema_name}"'))
 
     context.configure(
         connection=connection,
-        target_metadata=target_metadata,  # type: ignore
-        include_object=include_object,
+        target_metadata=target_metadata,
         version_table_schema=schema_name,
         include_schemas=True,
         compare_type=True,
@@ -240,12 +219,22 @@ def do_run_migrations(
         script_location=config.get_main_option("script_location"),
     )
 
-    with context.begin_transaction():
-        context.run_migrations()
+    # Migrations may call into code that reads CURRENT_TENANT_ID_CONTEXTVAR
+    # (e.g. get_kv_store().load() in 4ee1287bd26a). search_path alone is not
+    # enough — set the Python contextvar to match.
+    token = CURRENT_TENANT_ID_CONTEXTVAR.set(schema_name)
+    try:
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        CURRENT_TENANT_ID_CONTEXTVAR.reset(token)
 
 
 def provide_iam_token_for_alembic(
-    dialect: Any, conn_rec: Any, cargs: Any, cparams: Any
+    dialect: Any,  # noqa: ARG001
+    conn_rec: Any,  # noqa: ARG001
+    cargs: Any,  # noqa: ARG001
+    cparams: Any,
 ) -> None:
     if USE_IAM_AUTH:
         # Database connection settings
@@ -309,6 +298,7 @@ async def run_async_migrations() -> None:
                         schema_name=schema,
                         create_schema=create_schema,
                     )
+                    await connection.commit()
             except Exception as e:
                 logger.error(f"Error migrating schema {schema}: {e}")
                 if not continue_on_error:
@@ -346,6 +336,7 @@ async def run_async_migrations() -> None:
                         schema_name=schema,
                         create_schema=create_schema,
                     )
+                    await connection.commit()
             except Exception as e:
                 logger.error(f"Error migrating schema {schema}: {e}")
                 if not continue_on_error:
@@ -359,8 +350,7 @@ async def run_async_migrations() -> None:
         # upgrade_all_tenants=true or schemas in multi-tenant mode
         # and for non-multi-tenant mode, we should use schemas with the default schema
         raise ValueError(
-            "No migration target specified. Use either upgrade_all_tenants=true for all tenants "
-            "or schemas for specific schemas."
+            "No migration target specified. Use either upgrade_all_tenants=true for all tenants or schemas for specific schemas."
         )
 
     await engine.dispose()
@@ -400,9 +390,8 @@ def run_migrations_offline() -> None:
             logger.info(f"Migrating schema: {schema}")
             context.configure(
                 url=url,
-                target_metadata=target_metadata,  # type: ignore
+                target_metadata=target_metadata,
                 literal_binds=True,
-                include_object=include_object,
                 version_table_schema=schema,
                 include_schemas=True,
                 script_location=config.get_main_option("script_location"),
@@ -442,9 +431,8 @@ def run_migrations_offline() -> None:
             logger.info(f"Migrating schema: {schema}")
             context.configure(
                 url=url,
-                target_metadata=target_metadata,  # type: ignore
+                target_metadata=target_metadata,
                 literal_binds=True,
-                include_object=include_object,
                 version_table_schema=schema,
                 include_schemas=True,
                 script_location=config.get_main_option("script_location"),
@@ -456,8 +444,7 @@ def run_migrations_offline() -> None:
     else:
         # This should not happen in the new design
         raise ValueError(
-            "No migration target specified. Use either upgrade_all_tenants=true for all tenants "
-            "or schemas for specific schemas."
+            "No migration target specified. Use either upgrade_all_tenants=true for all tenants or schemas for specific schemas."
         )
 
 
@@ -473,7 +460,7 @@ def run_migrations_online() -> None:
 
     if connectable is not None:
         # pytest-alembic is providing an engine - use it directly
-        logger.info("run_migrations_online starting (pytest-alembic mode).")
+        logger.debug("run_migrations_online starting (pytest-alembic mode).")
 
         # For pytest-alembic, we use the default schema (public)
         schema_name = context.config.attributes.get(
@@ -487,8 +474,7 @@ def run_migrations_online() -> None:
 
             context.configure(
                 connection=connection,
-                target_metadata=target_metadata,  # type: ignore
-                include_object=include_object,
+                target_metadata=target_metadata,
                 version_table_schema=schema_name,
                 include_schemas=True,
                 compare_type=True,

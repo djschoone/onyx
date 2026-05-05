@@ -3,6 +3,7 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from typing import TypeVar
 from urllib.parse import urljoin
@@ -10,7 +11,6 @@ from urllib.parse import urlparse
 
 import requests
 from dateutil.parser import parse
-from dateutil.parser import ParserError
 
 from onyx.configs.app_configs import CONNECTOR_LOCALHOST_OVERRIDE
 from onyx.configs.constants import DocumentSource
@@ -19,7 +19,6 @@ from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import OnyxMetadata
 from onyx.utils.logger import setup_logger
 from onyx.utils.text_processing import is_valid_email
-
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -56,18 +55,16 @@ def time_str_to_utc(datetime_str: str) -> datetime:
             if fixed not in candidates:
                 candidates.append(fixed)
 
-    last_exception: Exception | None = None
-    for candidate in candidates:
-        try:
-            dt = parse(candidate)
-            return datetime_to_utc(dt)
-        except (ValueError, ParserError) as exc:
-            last_exception = exc
+    # dateutil is the primary; the stdlib RFC 2822 parser is a fallback for
+    # inputs dateutil rejects (e.g. headers concatenated without a CRLF —
+    # TZ may be dropped, datetime_to_utc then assumes UTC).
+    for parser in (parse, parsedate_to_datetime):
+        for candidate in candidates:
+            try:
+                return datetime_to_utc(parser(candidate))
+            except (TypeError, ValueError, OverflowError):
+                continue
 
-    if last_exception is not None:
-        raise last_exception
-
-    # Fallback in case parsing failed without raising (should not happen)
     raise ValueError(f"Unable to parse datetime string: {datetime_str}")
 
 
@@ -97,10 +94,17 @@ def basic_expert_info_representation(info: BasicExpertInfo) -> str | None:
 def get_experts_stores_representations(
     experts: list[BasicExpertInfo] | None,
 ) -> list[str] | None:
+    """Gets string representations of experts supplied.
+
+    If an expert cannot be represented as a string, it is omitted from the
+    result.
+    """
     if not experts:
         return None
 
-    reps = [basic_expert_info_representation(owner) for owner in experts]
+    reps: list[str | None] = [
+        basic_expert_info_representation(owner) for owner in experts
+    ]
     return [owner for owner in reps if owner is not None]
 
 
@@ -131,8 +135,7 @@ def _parse_document_source(connector_type: Any) -> DocumentSource | None:
         return DocumentSource(normalized)
     except ValueError:
         logger.warning(
-            f"Invalid connector_type value: '{connector_type}' "
-            f"(normalized: '{normalized}')"
+            f"Invalid connector_type value: '{connector_type}' (normalized: '{normalized}')"
         )
         return None
 
@@ -164,6 +167,7 @@ def process_onyx_metadata(
 
     return (
         OnyxMetadata(
+            document_id=metadata.get("id"),
             source_type=source_type,
             link=metadata.get("link"),
             file_display_name=metadata.get("file_display_name"),

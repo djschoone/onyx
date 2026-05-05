@@ -6,8 +6,11 @@ from sqlalchemy.orm import Session
 
 from onyx.auth.oauth_token_manager import OAuthTokenManager
 from onyx.chat.emitter import Emitter
+from onyx.configs.app_configs import DISABLE_VECTOR_DB
 from onyx.configs.model_configs import GEN_AI_TEMPERATURE
 from onyx.context.search.models import BaseFilters
+from onyx.context.search.models import PersonaSearchInfo
+from onyx.db.engine.sql_engine import get_session_with_current_tenant_if_none
 from onyx.db.enums import MCPAuthenticationPerformer
 from onyx.db.enums import MCPAuthenticationType
 from onyx.db.mcp import get_all_mcp_tools_for_server
@@ -19,7 +22,7 @@ from onyx.db.oauth_config import get_oauth_config
 from onyx.db.search_settings import get_current_search_settings
 from onyx.db.tools import get_builtin_tool
 from onyx.document_index.factory import get_default_document_index
-from onyx.document_index.interfaces import DocumentIndex
+from onyx.image_gen.interfaces import ImageGenerationProviderCredentials
 from onyx.llm.interfaces import LLM
 from onyx.llm.interfaces import LLMConfig
 from onyx.onyxbot.slack.models import SlackContext
@@ -30,18 +33,16 @@ from onyx.tools.models import SearchToolUsage
 from onyx.tools.tool_implementations.custom.custom_tool import (
     build_custom_tools_from_openapi_schema_and_headers,
 )
+from onyx.tools.tool_implementations.file_reader.file_reader_tool import FileReaderTool
 from onyx.tools.tool_implementations.images.image_generation_tool import (
     ImageGenerationTool,
 )
 from onyx.tools.tool_implementations.mcp.mcp_tool import MCPTool
-from onyx.tools.tool_implementations.open_url.open_url_tool import (
-    OpenURLTool,
-)
+from onyx.tools.tool_implementations.memory.memory_tool import MemoryTool
+from onyx.tools.tool_implementations.open_url.open_url_tool import OpenURLTool
 from onyx.tools.tool_implementations.python.python_tool import PythonTool
 from onyx.tools.tool_implementations.search.search_tool import SearchTool
-from onyx.tools.tool_implementations.web_search.web_search_tool import (
-    WebSearchTool,
-)
+from onyx.tools.tool_implementations.web_search.web_search_tool import WebSearchTool
 from onyx.utils.headers import header_dict_to_header_list
 from onyx.utils.logger import setup_logger
 
@@ -50,16 +51,30 @@ logger = setup_logger()
 
 class SearchToolConfig(BaseModel):
     user_selected_filters: BaseFilters | None = None
-    project_id: int | None = None
+    # Vespa metadata filters for overflowing user files.  These are NOT the
+    # IDs of the current project/persona — they are only set when the
+    # project's/persona's user files didn't fit in the LLM context window and
+    # must be found via vector DB search instead.
+    project_id_filter: int | None = None
+    persona_id_filter: int | None = None
     bypass_acl: bool = False
     additional_context: str | None = None
     slack_context: SlackContext | None = None
+    enable_slack_search: bool = True
+
+
+class FileReaderToolConfig(BaseModel):
+    # IDs from the ``user_file`` table (project / persona-attached files).
+    user_file_ids: list[UUID] = []
+    # IDs from the ``file_record`` table (chat-attached files).
+    chat_file_ids: list[UUID] = []
 
 
 class CustomToolConfig(BaseModel):
     chat_session_id: UUID | None = None
     message_id: int | None = None
     additional_headers: dict[str, str] | None = None
+    mcp_headers: dict[str, str] | None = None
 
 
 def _get_image_generation_config(llm: LLM, db_session: Session) -> LLMConfig:
@@ -75,32 +90,71 @@ def _get_image_generation_config(llm: LLM, db_session: Session) -> LLMConfig:
         raise ValueError("No default image generation configuration found")
 
     llm_provider = default_config.model_configuration.llm_provider
+
     return LLMConfig(
         model_provider=llm_provider.provider,
         model_name=default_config.model_configuration.name,
         temperature=GEN_AI_TEMPERATURE,
-        api_key=llm_provider.api_key,
+        api_key=(
+            llm_provider.api_key.get_value(apply_mask=False)
+            if llm_provider.api_key
+            else None
+        ),
         api_base=llm_provider.api_base,
         api_version=llm_provider.api_version,
         deployment_name=llm_provider.deployment_name,
         max_input_tokens=llm.config.max_input_tokens,
+        custom_config=llm_provider.custom_config,
     )
 
 
 def construct_tools(
     persona: Persona,
-    db_session: Session,
     emitter: Emitter,
-    user: User | None,
+    user: User,
     llm: LLM,
+    db_session: Session | None = None,
     search_tool_config: SearchToolConfig | None = None,
     custom_tool_config: CustomToolConfig | None = None,
+    file_reader_tool_config: FileReaderToolConfig | None = None,
     allowed_tool_ids: list[int] | None = None,
     search_usage_forcing_setting: SearchToolUsage = SearchToolUsage.AUTO,
 ) -> dict[int, list[Tool]]:
     """Constructs tools based on persona configuration and available APIs.
 
-    Will simply skip tools that are not allowed/available."""
+    Will simply skip tools that are not allowed/available.
+
+    Callers must supply a persona with ``tools``, ``document_sets``,
+    ``attached_documents``, and ``hierarchy_nodes`` already eager-loaded
+    (e.g. via ``eager_load_persona=True`` or ``eager_load_for_tools=True``)
+    to avoid lazy SQL queries after the session may have been flushed."""
+    with get_session_with_current_tenant_if_none(db_session) as db_session:
+        return _construct_tools_impl(
+            persona=persona,
+            db_session=db_session,
+            emitter=emitter,
+            user=user,
+            llm=llm,
+            search_tool_config=search_tool_config,
+            custom_tool_config=custom_tool_config,
+            file_reader_tool_config=file_reader_tool_config,
+            allowed_tool_ids=allowed_tool_ids,
+            search_usage_forcing_setting=search_usage_forcing_setting,
+        )
+
+
+def _construct_tools_impl(
+    persona: Persona,
+    db_session: Session,
+    emitter: Emitter,
+    user: User,
+    llm: LLM,
+    search_tool_config: SearchToolConfig | None = None,
+    custom_tool_config: CustomToolConfig | None = None,
+    file_reader_tool_config: FileReaderToolConfig | None = None,
+    allowed_tool_ids: list[int] | None = None,
+    search_usage_forcing_setting: SearchToolUsage = SearchToolUsage.AUTO,
+) -> dict[int, list[Tool]]:
     tool_dict: dict[int, list[Tool]] = {}
 
     # Log which tools are attached to the persona for debugging
@@ -112,21 +166,34 @@ def construct_tools(
     mcp_tool_cache: dict[int, dict[int, MCPTool]] = {}
     # Get user's OAuth token if available
     user_oauth_token = None
-    if user and user.oauth_accounts:
+    if user.oauth_accounts:
         user_oauth_token = user.oauth_accounts[0].access_token
 
-    document_index_cache: DocumentIndex | None = None
-    search_settings_cache = None
+    search_settings = get_current_search_settings(db_session)
+    # This flow is for search so we do not get all indices.
+    document_index = get_default_document_index(search_settings, None, db_session)
 
-    def _get_document_index() -> DocumentIndex:
-        nonlocal document_index_cache, search_settings_cache
-        if document_index_cache is None:
-            if search_settings_cache is None:
-                search_settings_cache = get_current_search_settings(db_session)
-            document_index_cache = get_default_document_index(
-                search_settings_cache, None
-            )
-        return document_index_cache
+    def _build_search_tool(tool_id: int, config: SearchToolConfig) -> SearchTool:
+        persona_search_info = PersonaSearchInfo(
+            document_set_names=[ds.name for ds in persona.document_sets],
+            search_start_date=persona.search_start_date,
+            attached_document_ids=[doc.id for doc in persona.attached_documents],
+            hierarchy_node_ids=[node.id for node in persona.hierarchy_nodes],
+        )
+        return SearchTool(
+            tool_id=tool_id,
+            emitter=emitter,
+            user=user,
+            persona_search_info=persona_search_info,
+            llm=llm,
+            document_index=document_index,
+            user_selected_filters=config.user_selected_filters,
+            project_id_filter=config.project_id_filter,
+            persona_id_filter=config.persona_id_filter,
+            bypass_acl=config.bypass_acl,
+            slack_context=config.slack_context,
+            enable_slack_search=config.enable_slack_search,
+        )
 
     added_search_tool = False
     for db_tool_model in persona.tools:
@@ -161,22 +228,9 @@ def construct_tools(
                 if not search_tool_config:
                     search_tool_config = SearchToolConfig()
 
-                # TODO concerning passing the db_session here.
-                search_tool = SearchTool(
-                    tool_id=db_tool_model.id,
-                    db_session=db_session,
-                    emitter=emitter,
-                    user=user,
-                    persona=persona,
-                    llm=llm,
-                    document_index=_get_document_index(),
-                    user_selected_filters=search_tool_config.user_selected_filters,
-                    project_id=search_tool_config.project_id,
-                    bypass_acl=search_tool_config.bypass_acl,
-                    slack_context=search_tool_config.slack_context,
-                )
-
-                tool_dict[db_tool_model.id] = [search_tool]
+                tool_dict[db_tool_model.id] = [
+                    _build_search_tool(db_tool_model.id, search_tool_config)
+                ]
 
             # Handle Image Generation Tool
             elif tool_cls.__name__ == ImageGenerationTool.__name__:
@@ -186,9 +240,17 @@ def construct_tools(
 
                 tool_dict[db_tool_model.id] = [
                     ImageGenerationTool(
-                        api_key=cast(str, img_generation_llm_config.api_key),
-                        api_base=img_generation_llm_config.api_base,
-                        api_version=img_generation_llm_config.api_version,
+                        image_generation_credentials=ImageGenerationProviderCredentials(
+                            api_key=cast(str, img_generation_llm_config.api_key),
+                            api_base=img_generation_llm_config.api_base,
+                            api_version=img_generation_llm_config.api_version,
+                            deployment_name=(
+                                img_generation_llm_config.deployment_name
+                                or img_generation_llm_config.model_name
+                            ),
+                            custom_config=img_generation_llm_config.custom_config,
+                        ),
+                        provider=img_generation_llm_config.model_provider,
                         model=img_generation_llm_config.model_name,
                         tool_id=db_tool_model.id,
                         emitter=emitter,
@@ -214,7 +276,7 @@ def construct_tools(
                         OpenURLTool(
                             tool_id=db_tool_model.id,
                             emitter=emitter,
-                            document_index=_get_document_index(),
+                            document_index=document_index,
                             user=user,
                         )
                     ]
@@ -228,6 +290,18 @@ def construct_tools(
             elif tool_cls.__name__ == PythonTool.__name__:
                 tool_dict[db_tool_model.id] = [
                     PythonTool(tool_id=db_tool_model.id, emitter=emitter)
+                ]
+
+            # Handle File Reader Tool
+            elif tool_cls.__name__ == FileReaderTool.__name__:
+                cfg = file_reader_tool_config or FileReaderToolConfig()
+                tool_dict[db_tool_model.id] = [
+                    FileReaderTool(
+                        tool_id=db_tool_model.id,
+                        emitter=emitter,
+                        user_file_ids=cfg.user_file_ids,
+                        chat_file_ids=cfg.chat_file_ids,
+                    )
                 ]
 
             # Handle KG Tool
@@ -258,7 +332,12 @@ def construct_tools(
             oauth_token_for_tool = None
 
             # Priority 1: OAuth config (per-tool OAuth)
-            if db_tool_model.oauth_config_id and user:
+            if db_tool_model.oauth_config_id:
+                if user.is_anonymous:
+                    logger.warning(
+                        f"Anonymous user cannot use OAuth tool {db_tool_model.id}"
+                    )
+                    continue
                 oauth_config = get_oauth_config(
                     db_tool_model.oauth_config_id, db_session
                 )
@@ -273,6 +352,11 @@ def construct_tools(
 
             # Priority 2: Passthrough auth (user's login OAuth token)
             elif db_tool_model.passthrough_auth:
+                if user.is_anonymous:
+                    logger.warning(
+                        f"Anonymous user cannot use passthrough auth tool {db_tool_model.id}"
+                    )
+                    continue
                 oauth_token_for_tool = user_oauth_token
 
             tool_dict[db_tool_model.id] = cast(
@@ -284,6 +368,8 @@ def construct_tools(
                     dynamic_schema_info=DynamicSchemaInfo(
                         chat_session_id=custom_tool_config.chat_session_id,
                         message_id=custom_tool_config.message_id,
+                        user_id=user.id,
+                        user_email="anonymous" if user.is_anonymous else user.email,
                     ),
                     custom_headers=(db_tool_model.custom_headers or [])
                     + (
@@ -307,11 +393,16 @@ def construct_tools(
 
             # Get user-specific connection config if needed
             connection_config = None
-            user_email = user.email if user else ""
+            user_email = user.email
             mcp_user_oauth_token = None
 
             if mcp_server.auth_type == MCPAuthenticationType.PT_OAUTH:
                 # Pass-through OAuth: use the user's login OAuth token
+                if user.is_anonymous:
+                    logger.warning(
+                        f"Anonymous user cannot use PT_OAUTH MCP server {mcp_server.id}"
+                    )
+                    continue
                 mcp_user_oauth_token = user_oauth_token
             elif (
                 mcp_server.auth_type == MCPAuthenticationType.API_TOKEN
@@ -332,6 +423,11 @@ def construct_tools(
             # Find the specific tool that this database entry represents
             expected_tool_name = db_tool_model.display_name
 
+            # Extract additional MCP headers from config
+            additional_mcp_headers = None
+            if custom_tool_config and custom_tool_config.mcp_headers:
+                additional_mcp_headers = custom_tool_config.mcp_headers
+
             mcp_tool_cache[db_tool_model.mcp_server_id] = {}
             # Find the matching tool definition
             for saved_tool in saved_tools:
@@ -345,7 +441,9 @@ def construct_tools(
                     tool_definition=saved_tool.mcp_input_schema or {},
                     connection_config=connection_config,
                     user_email=user_email,
+                    user_id=str(user.id),
                     user_oauth_token=mcp_user_oauth_token,
+                    additional_headers=additional_mcp_headers,
                 )
                 mcp_tool_cache[db_tool_model.mcp_server_id][saved_tool.id] = mcp_tool
 
@@ -359,32 +457,33 @@ def construct_tools(
     if (
         not added_search_tool
         and search_usage_forcing_setting == SearchToolUsage.ENABLED
+        and not DISABLE_VECTOR_DB
     ):
         # Get the database tool model for SearchTool
         search_tool_db_model = get_builtin_tool(db_session, SearchTool)
 
-        # Use the passed-in config if available, otherwise create a new one
         if not search_tool_config:
             search_tool_config = SearchToolConfig()
 
-        search_settings = get_current_search_settings(db_session)
-        document_index = get_default_document_index(search_settings, None)
+        tool_dict[search_tool_db_model.id] = [
+            _build_search_tool(search_tool_db_model.id, search_tool_config)
+        ]
 
-        search_tool = SearchTool(
-            tool_id=search_tool_db_model.id,
-            db_session=db_session,
-            emitter=emitter,
-            user=user,
-            persona=persona,
-            llm=llm,
-            document_index=document_index,
-            user_selected_filters=search_tool_config.user_selected_filters,
-            project_id=search_tool_config.project_id,
-            bypass_acl=search_tool_config.bypass_acl,
-            slack_context=search_tool_config.slack_context,
-        )
-
-        tool_dict[search_tool_db_model.id] = [search_tool]
+    # Always inject MemoryTool when the user has the memory tool enabled,
+    # bypassing persona tool associations and allowed_tool_ids filtering
+    if user.enable_memory_tool:
+        try:
+            memory_tool_db_model = get_builtin_tool(db_session, MemoryTool)
+            memory_tool = MemoryTool(
+                tool_id=memory_tool_db_model.id,
+                emitter=emitter,
+                llm=llm,
+            )
+            tool_dict[memory_tool_db_model.id] = [memory_tool]
+        except RuntimeError:
+            logger.warning(
+                "MemoryTool not found in the database. Run the latest alembic migration to seed it."
+            )
 
     tools: list[Tool] = []
     for tool_list in tool_dict.values():

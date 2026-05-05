@@ -1,5 +1,5 @@
 import { useFormContext } from "@/components/context/FormContext";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { SvgArrowLeft, SvgArrowRight, SvgPlusCircle } from "@opal/icons";
 
 const NavigationRow = ({
@@ -22,7 +22,11 @@ const NavigationRow = ({
       <div>
         {((formStep > 0 && !noCredentials) ||
           (formStep > 1 && !noAdvanced)) && (
-          <Button secondary onClick={prevFormStep} leftIcon={SvgArrowLeft}>
+          <Button
+            prominence="secondary"
+            onClick={prevFormStep}
+            icon={SvgArrowLeft}
+          >
             Previous
           </Button>
         )}
@@ -41,8 +45,8 @@ const NavigationRow = ({
       <div className="flex justify-end">
         {formStep === 0 && (
           <Button
-            action
             disabled={!activatedCredential}
+            variant="action"
             rightIcon={SvgArrowRight}
             onClick={() => nextFormStep()}
           >
@@ -51,8 +55,8 @@ const NavigationRow = ({
         )}
         {!noAdvanced && formStep === 1 && (
           <Button
-            secondary
             disabled={!isValid}
+            prominence="secondary"
             rightIcon={SvgArrowRight}
             onClick={() => nextFormStep()}
           >

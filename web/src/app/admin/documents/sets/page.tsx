@@ -2,7 +2,7 @@
 
 import { ThreeDotsLoader } from "@/components/Loading";
 import { PageSelector } from "@/components/PageSelector";
-import { BookmarkIcon, InfoIcon } from "@/components/icons/icons";
+import { SvgInfo } from "@opal/icons";
 import {
   Table,
   TableHead,
@@ -10,16 +10,18 @@ import {
   TableBody,
   TableCell,
 } from "@/components/ui/table";
-import Text from "@/components/ui/text";
+import { Divider, Text } from "@opal/components";
+import { markdown } from "@opal/utils";
+import Spacer from "@/refresh-components/Spacer";
 import Title from "@/components/ui/title";
-import Separator from "@/refresh-components/Separator";
 import { DocumentSetSummary } from "@/lib/types";
 import { useState } from "react";
 import { useDocumentSets } from "./hooks";
 import { ConnectorTitle } from "@/components/admin/connectors/ConnectorTitle";
 import { deleteDocumentSet } from "./lib";
-import { PopupSpec, usePopup } from "@/components/admin/connectors/Popup";
-import { AdminPageTitle } from "@/components/admin/Title";
+import { toast } from "@/hooks/useToast";
+import * as SettingsLayouts from "@/layouts/settings-layouts";
+import { ADMIN_ROUTES } from "@/lib/admin-routes";
 import {
   FiAlertTriangle,
   FiCheckCircle,
@@ -32,16 +34,12 @@ import { DeleteButton } from "@/components/DeleteButton";
 import { useRouter } from "next/navigation";
 import { TableHeader } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Tooltip } from "@opal/components";
 import CreateButton from "@/refresh-components/buttons/CreateButton";
 import { SourceIcon } from "@/components/SourceIcon";
 import Link from "next/link";
 
+const route = ADMIN_ROUTES.DOCUMENT_SETS;
 const numToDisplay = 50;
 
 // Component to display federated connectors with consistent styling
@@ -120,36 +118,29 @@ const EditRow = ({
 
   return (
     <div className="relative flex">
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div
-              className={`
+      <Tooltip
+        tooltip={
+          !documentSet.is_up_to_date
+            ? "Cannot update while syncing! Wait for the sync to finish, then try again."
+            : undefined
+        }
+      >
+        <div
+          className={`
               text-text-darker font-medium my-auto p-1 hover:bg-accent-background flex items-center select-none
               ${documentSet.is_up_to_date ? "cursor-pointer" : "cursor-default"}
             `}
-              style={{ wordBreak: "normal", overflowWrap: "break-word" }}
-              onClick={() => {
-                if (documentSet.is_up_to_date) {
-                  router.push(`/admin/documents/sets/${documentSet.id}`);
-                }
-              }}
-            >
-              <FiEdit2 className="mr-2 flex-shrink-0" />
-              <span className="font-medium">{documentSet.name}</span>
-            </div>
-          </TooltipTrigger>
-          {!documentSet.is_up_to_date && (
-            <TooltipContent width="max-w-sm">
-              <div className="flex break-words break-keep whitespace-pre-wrap items-start">
-                <InfoIcon className="mr-2 mt-0.5" />
-                Cannot update while syncing! Wait for the sync to finish, then
-                try again.
-              </div>
-            </TooltipContent>
-          )}
-        </Tooltip>
-      </TooltipProvider>
+          style={{ wordBreak: "normal", overflowWrap: "break-word" }}
+          onClick={() => {
+            if (documentSet.is_up_to_date) {
+              router.push(`/admin/documents/sets/${documentSet.id}`);
+            }
+          }}
+        >
+          <FiEdit2 className="mr-2 flex-shrink-0" />
+          <span className="font-medium">{documentSet.name}</span>
+        </div>
+      </Tooltip>
     </div>
   );
 };
@@ -158,7 +149,6 @@ interface DocumentFeedbackTableProps {
   documentSets: DocumentSetSummary[];
   refresh: () => void;
   refreshEditable: () => void;
-  setPopup: (popupSpec: PopupSpec | null) => void;
   editableDocumentSets: DocumentSetSummary[];
 }
 
@@ -167,7 +157,6 @@ const DocumentSetTable = ({
   editableDocumentSets,
   refresh,
   refreshEditable,
-  setPopup,
 }: DocumentFeedbackTableProps) => {
   const [page, setPage] = useState(1);
 
@@ -324,16 +313,14 @@ const DocumentSetTable = ({
                             documentSet.id
                           );
                           if (response.ok) {
-                            setPopup({
-                              message: `Document set "${documentSet.name}" scheduled for deletion`,
-                              type: "success",
-                            });
+                            toast.success(
+                              `Document set "${documentSet.name}" scheduled for deletion`
+                            );
                           } else {
                             const errorMsg = (await response.json()).detail;
-                            setPopup({
-                              message: `Failed to schedule document set for deletion - ${errorMsg}`,
-                              type: "error",
-                            });
+                            toast.error(
+                              `Failed to schedule document set for deletion - ${errorMsg}`
+                            );
                           }
                           refresh();
                           refreshEditable();
@@ -362,8 +349,7 @@ const DocumentSetTable = ({
   );
 };
 
-const Main = () => {
-  const { popup, setPopup } = usePopup();
+function Main() {
   const {
     data: documentSets,
     isLoading: isDocumentSetsLoading,
@@ -396,12 +382,12 @@ const Main = () => {
 
   return (
     <div className="mb-8">
-      {popup}
-      <Text className="mb-3">
-        <b>Document Sets</b> allow you to group logically connected documents
-        into a single bundle. These can then be used as a filter when performing
-        searches to control the scope of information Onyx searches over.
+      <Text as="p">
+        {markdown(
+          "**Document Sets** allow you to group logically connected documents into a single bundle. These can then be used as a filter when performing searches to control the scope of information Onyx searches over."
+        )}
       </Text>
+      <Spacer rem={0.75} />
 
       <div className="mb-3"></div>
 
@@ -413,28 +399,26 @@ const Main = () => {
 
       {documentSets.length > 0 && (
         <>
-          <Separator />
+          <Divider />
           <DocumentSetTable
             documentSets={documentSets}
             editableDocumentSets={editableDocumentSets}
             refresh={refreshDocumentSets}
             refreshEditable={refreshEditableDocumentSets}
-            setPopup={setPopup}
           />
         </>
       )}
     </div>
   );
-};
+}
 
-const Page = () => {
+export default function Page() {
   return (
-    <div className="container">
-      <AdminPageTitle icon={<BookmarkIcon size={32} />} title="Document Sets" />
-
-      <Main />
-    </div>
+    <SettingsLayouts.Root>
+      <SettingsLayouts.Header icon={route.icon} title={route.title} divider />
+      <SettingsLayouts.Body>
+        <Main />
+      </SettingsLayouts.Body>
+    </SettingsLayouts.Root>
   );
-};
-
-export default Page;
+}

@@ -7,10 +7,9 @@ from typing import Optional
 import requests
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.cross_connector_utils.rate_limit_wrapper import (
-    rate_limit_builder,
-)
+from onyx.connectors.cross_connector_utils.rate_limit_wrapper import rate_limit_builder
 from onyx.connectors.document360.utils import flatten_child_categories
 from onyx.connectors.interfaces import GenerateDocumentsOutput
 from onyx.connectors.interfaces import LoadConnector
@@ -19,6 +18,7 @@ from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.file_processing.html_utils import parse_html_page_basic
 from onyx.utils.retry_wrapper import retry_builder
@@ -64,7 +64,10 @@ class Document360Connector(LoadConnector, PollConnector):
         headers = {"accept": "application/json", "api_token": self.api_token}
 
         response = requests.get(
-            f"{DOCUMENT360_API_BASE_URL}/{endpoint}", headers=headers, params=params
+            f"{DOCUMENT360_API_BASE_URL}/{endpoint}",
+            headers=headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
 
@@ -119,7 +122,7 @@ class Document360Connector(LoadConnector, PollConnector):
         workspace_id = self._get_workspace_id_by_name()
         articles = self._get_articles_with_category(workspace_id)
 
-        doc_batch: List[Document] = []
+        doc_batch: List[Document | HierarchyNode] = []
 
         for article in articles:
             article_details = self._make_request(
@@ -190,8 +193,8 @@ class Document360Connector(LoadConnector, PollConnector):
 
 
 if __name__ == "__main__":
-    import time
     import os
+    import time
 
     document360_connector = Document360Connector(os.environ["DOCUMENT360_WORKSPACE"])
     document360_connector.load_credentials(

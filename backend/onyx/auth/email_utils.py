@@ -7,8 +7,8 @@ from email.mime.text import MIMEText
 from email.utils import formatdate
 from email.utils import make_msgid
 
-import sendgrid  # type: ignore
-from sendgrid.helpers.mail import Attachment  # type: ignore
+import sendgrid
+from sendgrid.helpers.mail import Attachment
 from sendgrid.helpers.mail import Content
 from sendgrid.helpers.mail import ContentId
 from sendgrid.helpers.mail import Disposition
@@ -353,20 +353,11 @@ def build_user_email_invite(
             "or login with Google and complete your registration.</p>"
         )
     elif auth_type == AuthType.BASIC:
-        message += (
-            "<p>To join the organization, please click the button below to set a password "
-            "and complete your registration.</p>"
-        )
+        message += "<p>To join the organization, please click the button below to set a password and complete your registration.</p>"
     elif auth_type == AuthType.GOOGLE_OAUTH:
-        message += (
-            "<p>To join the organization, please click the button below to login with Google "
-            "and complete your registration.</p>"
-        )
+        message += "<p>To join the organization, please click the button below to login with Google and complete your registration.</p>"
     elif auth_type == AuthType.OIDC or auth_type == AuthType.SAML:
-        message += (
-            "<p>To join the organization, please click the button below to"
-            " complete your registration.</p>"
-        )
+        message += "<p>To join the organization, please click the button below to complete your registration.</p>"
     else:
         raise ValueError(f"Invalid auth type: {auth_type}")
 

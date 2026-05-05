@@ -1,6 +1,6 @@
-import { test, expect } from "@chromatic-com/playwright";
+import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { loginAs, loginAsRandomUser } from "../utils/auth";
+import { loginAs, loginAsRandomUser } from "@tests/e2e/utils/auth";
 
 test.use({ storageState: "admin_auth.json" });
 
@@ -50,10 +50,10 @@ async function navigateToUserSettings(page: Page) {
   await page.locator("#onyx-user-dropdown").click();
 
   // Click on settings option
-  await page.getByText("User Settings").click();
+  await page.getByText("Settings").click();
 
   // Wait for settings modal to appear
-  await expect(page.locator("h2", { hasText: "User Settings" })).toBeVisible();
+  await expect(page.locator("h2", { hasText: "Settings" })).toBeVisible();
 }
 
 async function openConnectorsTab(page: Page) {
@@ -146,7 +146,7 @@ test.skip("Federated Slack Connector - Create, OAuth Modal, and User Settings Fl
     await loginAsRandomUser(page);
 
     // Navigate back to main page and verify OAuth modal appears
-    await page.goto("/chat");
+    await page.goto("/app");
     await page.waitForLoadState("networkidle");
 
     // Check if the OAuth modal appears

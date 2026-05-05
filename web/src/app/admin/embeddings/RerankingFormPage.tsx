@@ -14,16 +14,11 @@ import {
   rerankingModels,
 } from "./interfaces";
 import { FiExternalLink } from "react-icons/fi";
-import {
-  AmazonIcon,
-  CohereIcon,
-  LiteLLMIcon,
-  MixedBreadIcon,
-} from "@/components/icons/icons";
+import { SvgAws, SvgCohere, SvgLitellm, SvgMixedbread } from "@opal/logos";
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { TextFormField } from "@/components/Field";
-import { SettingsContext } from "@/components/settings/SettingsProvider";
+import { SettingsContext } from "@/providers/SettingsProvider";
 import { SvgAlertTriangle, SvgKey } from "@opal/icons";
 
 interface RerankingDetailsFormProps {
@@ -281,15 +276,15 @@ const RerankingDetailsForm = forwardRef<
                           <div className="flex items-center">
                             {card.rerank_provider_type ===
                             RerankerProvider.LITELLM ? (
-                              <LiteLLMIcon size={24} className="mr-2" />
+                              <SvgLitellm size={24} className="mr-2" />
                             ) : card.rerank_provider_type ===
                               RerankerProvider.COHERE ? (
-                              <CohereIcon size={24} className="mr-2" />
+                              <SvgCohere size={24} className="mr-2" />
                             ) : card.rerank_provider_type ===
                               RerankerProvider.BEDROCK ? (
-                              <AmazonIcon size={24} className="mr-2" />
+                              <SvgAws size={24} className="mr-2" />
                             ) : (
-                              <MixedBreadIcon size={24} className="mr-2" />
+                              <SvgMixedbread size={24} className="mr-2" />
                             )}
                             <h3 className="font-bold text-lg">
                               {card.displayName}
@@ -323,7 +318,7 @@ const RerankingDetailsForm = forwardRef<
                     open
                     onOpenChange={() => setShowGpuWarningModalModel(null)}
                   >
-                    <Modal.Content small>
+                    <Modal.Content width="sm" height="sm">
                       <Modal.Header
                         icon={SvgAlertTriangle}
                         title="GPU Not Enabled"
@@ -339,7 +334,7 @@ const RerankingDetailsForm = forwardRef<
                           better performance.
                         </p>
                       </Modal.Body>
-                      <Modal.Footer className="p-4 flex justify-end">
+                      <Modal.Footer>
                         <Button
                           onClick={() => setShowGpuWarningModalModel(null)}
                         >
@@ -358,7 +353,7 @@ const RerankingDetailsForm = forwardRef<
                       setShowLiteLLMConfigurationModal(false);
                     }}
                   >
-                    <Modal.Content medium>
+                    <Modal.Content>
                       <Modal.Header
                         icon={SvgKey}
                         title="API Key Configuration"
@@ -433,7 +428,7 @@ const RerankingDetailsForm = forwardRef<
                           />
                         </div>
                       </Modal.Body>
-                      <Modal.Footer className="p-4 flex w-full justify-end">
+                      <Modal.Footer>
                         <Button
                           onClick={() => {
                             setShowLiteLLMConfigurationModal(false);
@@ -462,7 +457,7 @@ const RerankingDetailsForm = forwardRef<
                       setIsApiKeyModalOpen(false);
                     }}
                   >
-                    <Modal.Content medium>
+                    <Modal.Content>
                       <Modal.Header
                         icon={SvgKey}
                         title="API Key Configuration"
@@ -513,7 +508,7 @@ const RerankingDetailsForm = forwardRef<
                           />
                         </div>
                       </Modal.Body>
-                      <Modal.Footer className="p-4 flex w-full justify-end">
+                      <Modal.Footer>
                         <Button onClick={() => setIsApiKeyModalOpen(false)}>
                           Update
                         </Button>

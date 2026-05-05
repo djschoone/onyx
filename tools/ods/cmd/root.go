@@ -41,14 +41,28 @@ func NewRootCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.Debug, "debug", false, "run in debug mode")
 
 	// Add subcommands
+	cmd.AddCommand(NewBackendCommand())
 	cmd.AddCommand(NewCheckLazyImportsCommand())
 	cmd.AddCommand(NewCherryPickCommand())
 	cmd.AddCommand(NewDBCommand())
+	cmd.AddCommand(NewDeployCommand())
 	cmd.AddCommand(NewOpenAPICommand())
+	cmd.AddCommand(NewComposeCommand())
+	cmd.AddCommand(NewLogsCommand())
+	cmd.AddCommand(NewPullCommand())
+	cmd.AddCommand(NewRunCICommand())
+	cmd.AddCommand(NewScreenshotDiffCommand())
+	cmd.AddCommand(NewDesktopCommand())
+	cmd.AddCommand(NewDevCommand())
+	cmd.AddCommand(NewWebCommand())
+	cmd.AddCommand(NewLatestStableTagCommand())
+	cmd.AddCommand(NewWhoisCommand())
+	cmd.AddCommand(NewTraceCommand())
+	cmd.AddCommand(NewInstallSkillCommand())
 
 	return cmd
 }
 
 func rootCmd(cmd *cobra.Command, args []string) {
-	log.Debug("Debug log in rootCmd")
+	_ = cmd.Help()
 }

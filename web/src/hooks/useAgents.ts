@@ -1,14 +1,19 @@
+"use client";
+
 import useSWR from "swr";
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import {
   MinimalPersonaSnapshot,
   FullPersona,
-} from "@/app/admin/assistants/interfaces";
+  Persona,
+} from "@/app/admin/agents/interfaces";
 import { errorHandlingFetcher } from "@/lib/fetcher";
-import { pinAgents } from "../lib/assistants/orderAssistants";
-import { useUser } from "@/components/user/UserProvider";
+import { buildApiPath } from "@/lib/urlBuilder";
+import { pinAgents } from "@/lib/agents";
+import { useUser } from "@/providers/UserProvider";
 import { useSearchParams } from "next/navigation";
-import { SEARCH_PARAM_NAMES } from "@/app/chat/services/searchParams";
+import { SEARCH_PARAM_NAMES } from "@/app/app/services/searchParams";
 import useChatSessions from "./useChatSessions";
 
 /**
@@ -34,10 +39,11 @@ import useChatSessions from "./useChatSessions";
  */
 export function useAgents() {
   const { data, error, mutate } = useSWR<MinimalPersonaSnapshot[]>(
-    "/api/persona",
+    SWR_KEYS.personas,
     errorHandlingFetcher,
     {
       revalidateOnFocus: false,
+      revalidateIfStale: false,
       dedupingInterval: 60000,
     }
   );
@@ -73,18 +79,19 @@ export function useAgents() {
  * return <AgentEditor agent={agent} />;
  */
 export function useAgent(agentId: number | null) {
-  const { data, error, mutate } = useSWR<FullPersona>(
-    agentId ? `/api/persona/${agentId}` : null,
+  const { data, error, isLoading, mutate } = useSWR<FullPersona>(
+    agentId ? SWR_KEYS.persona(agentId) : null,
     errorHandlingFetcher,
     {
       revalidateOnFocus: false,
+      revalidateIfStale: false,
       dedupingInterval: 60000,
     }
   );
 
   return {
     agent: data ?? null,
-    isLoading: !error && !data && agentId !== null,
+    isLoading,
     error,
     refresh: mutate,
   };
@@ -107,22 +114,25 @@ export function usePinnedAgents() {
   const serverPinnedAgents = useMemo(() => {
     if (agents.length === 0) return [];
 
-    const pinned = (user?.preferences.pinned_assistants ?? [])
+    // If pinned_assistants is null/undefined (never set), show featured personas
+    // If it's an empty array (user explicitly unpinned all), show nothing
+    const pinnedIds = user?.preferences.pinned_assistants;
+    if (pinnedIds === null || pinnedIds === undefined) {
+      return agents.filter((agent) => agent.is_featured && agent.id !== 0);
+    }
+
+    return pinnedIds
       .map((id) => agents.find((agent) => agent.id === id))
       .filter((agent): agent is MinimalPersonaSnapshot => !!agent);
-
-    // Fallback to default personas if no pinned agents
-    return pinned.length > 0
-      ? pinned
-      : agents.filter((agent) => agent.is_default_persona && agent.id !== 0);
   }, [agents, user?.preferences.pinned_assistants]);
 
   // Sync server data → local state when server data changes
+  // Only sync when agents have loaded (to avoid syncing empty during initial load)
   useEffect(() => {
-    if (serverPinnedAgents.length > 0) {
+    if (agents.length > 0) {
       setLocalPinnedAgents(serverPinnedAgents);
     }
-  }, [serverPinnedAgents]);
+  }, [serverPinnedAgents, agents.length]);
 
   // Toggle pin status - updates local state AND persists to server
   const togglePinnedAgent = useCallback(
@@ -164,7 +174,7 @@ export function usePinnedAgents() {
 
 /**
  * Hook to determine the currently active agent based on:
- * 1. URL param `assistantId`
+ * 1. URL param `agentId`
  * 2. Chat session's `persona_id`
  * 3. Falls back to null if neither is present
  */
@@ -189,4 +199,68 @@ export function useCurrentAgent(): MinimalPersonaSnapshot | null {
   }, [agents, agentIdRaw, currentChatSession?.persona_id]);
 
   return currentAgent;
+}
+
+// ---------------------------------------------------------------------------
+// Admin agents (full Persona objects, requires admin/curator access)
+// ---------------------------------------------------------------------------
+
+interface UseAdminAgentsOptions {
+  includeDeleted?: boolean;
+  getEditable?: boolean;
+  includeDefault?: boolean;
+  pageNum?: number;
+  pageSize?: number;
+}
+
+interface PaginatedAgentsResponse {
+  items: Persona[];
+  total_items: number;
+}
+
+export function useAdminAgents(options: UseAdminAgentsOptions = {}) {
+  const {
+    includeDeleted = false,
+    getEditable = false,
+    includeDefault = false,
+    pageNum,
+    pageSize,
+  } = options;
+
+  // If pageNum and pageSize are provided, use paginated endpoint.
+  const usePagination = pageNum !== undefined && pageSize !== undefined;
+
+  const url = usePagination
+    ? buildApiPath("/api/admin/agents", {
+        include_deleted: includeDeleted,
+        get_editable: getEditable,
+        include_default: includeDefault,
+        page_num: pageNum,
+        page_size: pageSize,
+      })
+    : buildApiPath("/api/admin/persona", {
+        include_deleted: includeDeleted,
+        get_editable: getEditable,
+      });
+
+  const { data, error, isLoading, mutate } = useSWR<
+    Persona[] | PaginatedAgentsResponse
+  >(url, errorHandlingFetcher);
+
+  // Handle both paginated and non-paginated responses
+  const agents = usePagination
+    ? (data as PaginatedAgentsResponse)?.items || []
+    : (data as Persona[]) || [];
+
+  const totalItems = usePagination
+    ? (data as PaginatedAgentsResponse)?.total_items || 0
+    : agents.length;
+
+  return {
+    agents,
+    totalItems,
+    error,
+    isLoading,
+    refresh: mutate,
+  };
 }

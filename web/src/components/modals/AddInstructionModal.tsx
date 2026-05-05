@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Button from "@/refresh-components/buttons/Button";
-import { useProjectsContext } from "@/app/chat/projects/ProjectsContext";
-import InputTextarea from "@/refresh-components/inputs/InputTextArea";
+import { Button } from "@opal/components";
+import { useProjectsContext } from "@/providers/ProjectsContext";
+import InputTextArea from "@/refresh-components/inputs/InputTextArea";
 import { useModal } from "@/refresh-components/contexts/ModalContext";
 import { SvgAddLines } from "@opal/icons";
 import Modal from "@/refresh-components/Modal";
@@ -31,22 +31,22 @@ export default function AddInstructionModal() {
 
   return (
     <Modal open={modal.isOpen} onOpenChange={modal.toggle}>
-      <Modal.Content mini>
+      <Modal.Content width="sm">
         <Modal.Header
           icon={SvgAddLines}
           title="Set Project Instructions"
-          description="Instruct specific behaviors, focus, tones, or formats for the response in this project."
+          description="Specify the behaviors or tone for the chat sessions in this project."
           onClose={() => modal.toggle(false)}
         />
-        <Modal.Body className="bg-background-tint-01 p-4">
-          <InputTextarea
+        <Modal.Body>
+          <InputTextArea
             value={instructionText}
             onChange={(event) => setInstructionText(event.target.value)}
-            placeholder="Think step by step and show reasoning for complex problems. Use specific examples."
+            placeholder="My goal with is to... be sure to... in your responses."
           />
         </Modal.Body>
-        <Modal.Footer className="flex flex-row justify-end gap-2 p-4 w-full">
-          <Button secondary onClick={() => modal.toggle(false)}>
+        <Modal.Footer>
+          <Button prominence="secondary" onClick={() => modal.toggle(false)}>
             Cancel
           </Button>
           <Button onClick={handleSubmit}>Save Instructions</Button>

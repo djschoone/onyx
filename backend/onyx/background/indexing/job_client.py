@@ -125,6 +125,36 @@ class SimpleJob:
             return True
         return False
 
+    def terminate_and_wait(self, sigterm_grace_seconds: float) -> bool:
+        """Best-effort hard-kill of the spawned process.
+
+        Sends SIGTERM, waits up to `sigterm_grace_seconds` for the process to exit,
+        then escalates to SIGKILL if the process is still alive. Joins after each
+        signal so the OS can reap the child. Returns True if the process was alive
+        when this was called (i.e. we actually had to do something).
+        """
+        if self.process is None:
+            return False
+        if not self.process.is_alive():
+            return False
+
+        pid = self.process.pid
+        logger.warning(
+            f"SimpleJob.terminate_and_wait - sending SIGTERM to job: id={self.id} pid={pid}"
+        )
+        self.process.terminate()
+        self.process.join(timeout=sigterm_grace_seconds)
+
+        if self.process.is_alive():
+            logger.warning(
+                f"SimpleJob.terminate_and_wait - SIGTERM grace exceeded, sending SIGKILL: "
+                f"id={self.id} pid={pid} grace={sigterm_grace_seconds}s"
+            )
+            self.process.kill()
+            self.process.join()
+
+        return True
+
     @property
     def status(self) -> JobStatusType:
         if not self.process:
@@ -174,13 +204,17 @@ class SimpleJobClient:
                 logger.debug(f"Cleaning up job with id: '{job.id}'")
                 del self.jobs[job.id]
 
-    def submit(self, func: Callable, *args: Any, pure: bool = True) -> SimpleJob | None:
+    def submit(
+        self,
+        func: Callable,
+        *args: Any,
+        pure: bool = True,  # noqa: ARG002
+    ) -> SimpleJob | None:
         """NOTE: `pure` arg is needed so this can be a drop in replacement for Dask"""
         self._cleanup_completed_jobs()
         if len(self.jobs) >= self.n_workers:
             logger.debug(
-                f"No available workers to run job. "
-                f"Currently running '{len(self.jobs)}' jobs, with a limit of '{self.n_workers}'."
+                f"No available workers to run job. Currently running '{len(self.jobs)}' jobs, with a limit of '{self.n_workers}'."
             )
             return None
 

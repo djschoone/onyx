@@ -10,17 +10,17 @@ from pydantic import BaseModel
 from requests import Response
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
 from onyx.connectors.cross_connector_utils.miscellaneous_utils import time_str_to_utc
-from onyx.connectors.cross_connector_utils.rate_limit_wrapper import (
-    rate_limit_builder,
-)
+from onyx.connectors.cross_connector_utils.rate_limit_wrapper import rate_limit_builder
 from onyx.connectors.interfaces import GenerateDocumentsOutput
 from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import ImageSection
 from onyx.connectors.models import TextSection
 from onyx.file_processing.html_utils import parse_html_page_basic
@@ -41,7 +41,9 @@ def discourse_request(
 ) -> Response:
     headers = {"Api-Key": perms.api_key, "Api-Username": perms.api_username}
 
-    response = requests.get(endpoint, headers=headers, params=params)
+    response = requests.get(
+        endpoint, headers=headers, params=params, timeout=REQUEST_TIMEOUT_SECONDS
+    )
     response.raise_for_status()
 
     return response
@@ -193,7 +195,7 @@ class DiscourseConnector(PollConnector):
     ) -> GenerateDocumentsOutput:
         page = 0
         while topic_ids := self._get_latest_topics(start, end, page):
-            doc_batch: list[Document] = []
+            doc_batch: list[Document | HierarchyNode] = []
             for topic_id in topic_ids:
                 doc_batch.append(self._get_doc_from_topic(topic_id))
                 if len(doc_batch) >= self.batch_size:
@@ -220,8 +222,8 @@ class DiscourseConnector(PollConnector):
         if self.permissions is None:
             raise ConnectorMissingCredentialError("Discourse")
 
-        start_datetime = datetime.utcfromtimestamp(start).replace(tzinfo=timezone.utc)
-        end_datetime = datetime.utcfromtimestamp(end).replace(tzinfo=timezone.utc)
+        start_datetime = datetime.fromtimestamp(start, tz=timezone.utc)
+        end_datetime = datetime.fromtimestamp(end, tz=timezone.utc)
 
         self._get_categories_map()
 

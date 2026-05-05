@@ -1,13 +1,10 @@
 "use client";
 
-import { MinimalPersonaSnapshot } from "@/app/admin/assistants/interfaces";
-import { buildImgUrl } from "@/app/chat/components/files/images/utils";
-import { OnyxIcon } from "@/components/icons/icons";
-import { useSettingsContext } from "@/components/settings/SettingsProvider";
-import {
-  DEFAULT_AGENT_AVATAR_SIZE_PX,
-  DEFAULT_ASSISTANT_ID,
-} from "@/lib/constants";
+import { MinimalPersonaSnapshot } from "@/app/admin/agents/interfaces";
+import { buildAgentAvatarUrl } from "@/app/app/components/files/images/utils";
+import { SvgOnyxLogo } from "@opal/logos";
+import { useSettingsContext } from "@/providers/SettingsProvider";
+import { DEFAULT_AVATAR_SIZE_PX, DEFAULT_AGENT_ID } from "@/lib/constants";
 import CustomAgentAvatar from "@/refresh-components/avatars/CustomAgentAvatar";
 import Image from "next/image";
 
@@ -18,12 +15,12 @@ export interface AgentAvatarProps {
 
 export default function AgentAvatar({
   agent,
-  size = DEFAULT_AGENT_AVATAR_SIZE_PX,
+  size = DEFAULT_AVATAR_SIZE_PX,
   ...props
 }: AgentAvatarProps) {
   const settings = useSettingsContext();
 
-  if (agent.id === DEFAULT_ASSISTANT_ID) {
+  if (agent.id === DEFAULT_AGENT_ID) {
     return settings.enterpriseSettings?.use_custom_logo ? (
       <div
         className="aspect-square rounded-full overflow-hidden relative"
@@ -38,18 +35,14 @@ export default function AgentAvatar({
         />
       </div>
     ) : (
-      <OnyxIcon size={size} className="shrink-0" />
+      <SvgOnyxLogo size={size} className="shrink-0" />
     );
   }
 
   return (
     <CustomAgentAvatar
       name={agent.name}
-      src={
-        agent.uploaded_image_id
-          ? buildImgUrl(agent.uploaded_image_id)
-          : undefined
-      }
+      src={agent.uploaded_image_id ? buildAgentAvatarUrl(agent.id) : undefined}
       iconName={agent.icon_name}
       size={size}
       {...props}

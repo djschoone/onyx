@@ -1,6 +1,6 @@
 import { Formik, Form } from "formik";
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { TextFormField } from "@/components/Field";
 import { SvgEdit } from "@opal/icons";
 export interface EditPropertyModalProps {
@@ -24,7 +24,7 @@ export default function EditPropertyModal({
 }: EditPropertyModalProps) {
   return (
     <Modal open onOpenChange={onClose}>
-      <Modal.Content medium>
+      <Modal.Content width="sm">
         <Modal.Header
           icon={SvgEdit}
           title={`Edit ${propertyTitle}`}
@@ -43,7 +43,7 @@ export default function EditPropertyModal({
             }}
           >
             {({ isSubmitting, isValid, values }) => (
-              <Form className="items-stretch">
+              <Form className="w-full">
                 <TextFormField
                   vertical
                   label={propertyDetails || ""}
@@ -53,12 +53,12 @@ export default function EditPropertyModal({
 
                 <Modal.Footer>
                   <Button
-                    type="submit"
                     disabled={
                       isSubmitting ||
                       !isValid ||
                       values.propertyValue === propertyValue
                     }
+                    type="submit"
                   >
                     {isSubmitting ? "Updating..." : "Update property"}
                   </Button>

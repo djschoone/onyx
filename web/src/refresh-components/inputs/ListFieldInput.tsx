@@ -51,8 +51,7 @@ export function ListFieldInput({
       <InputTypeIn
         placeholder={placeholder}
         value={inputValue}
-        disabled={disabled}
-        error={error}
+        variant={disabled ? "disabled" : error ? "error" : undefined}
         onChange={(e) => setInputValue(e.target.value)}
         onKeyDown={handleKeyDown}
       />
@@ -60,6 +59,7 @@ export function ListFieldInput({
       <div className="mt-3">
         <div className="flex flex-wrap gap-1.5">
           {values.map((value, index) => (
+            // TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved
             <Button
               key={index}
               internal

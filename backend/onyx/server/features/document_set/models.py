@@ -63,6 +63,7 @@ class DocumentSetCreationRequest(BaseModel):
 
 class DocumentSetUpdateRequest(BaseModel):
     id: int
+    name: str
     description: str
     cc_pair_ids: list[int]
     is_public: bool
@@ -111,7 +112,8 @@ class DocumentSet(BaseModel):
                     id=cc_pair.id,
                     name=cc_pair.name,
                     connector=ConnectorSnapshot.from_connector_db_model(
-                        cc_pair.connector
+                        cc_pair.connector,
+                        credential_ids=[cc_pair.credential_id],
                     ),
                     credential=CredentialSnapshot.from_credential_db_model(
                         cc_pair.credential

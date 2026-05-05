@@ -8,7 +8,6 @@ from onyx.connectors.google_utils.resources import get_google_docs_service
 from onyx.connectors.google_utils.resources import GoogleDocsService
 from onyx.connectors.google_utils.resources import GoogleDriveService
 
-
 GOOGLE_SCOPES = {
     "google_drive": [
         "https://www.googleapis.com/auth/drive",
@@ -41,11 +40,14 @@ class GoogleDriveManager:
         service = get_drive_service(credentials, impersonated_user_email)
 
         # Verify impersonation
-        about = service.about().get(fields="user").execute()
+        about = (
+            service.about()  # ty: ignore[unresolved-attribute]
+            .get(fields="user")
+            .execute()
+        )
         if about.get("user", {}).get("emailAddress") != impersonated_user_email:
             raise ValueError(
-                f"Failed to impersonate {impersonated_user_email}. "
-                f"Instead got {about.get('user', {}).get('emailAddress')}"
+                f"Failed to impersonate {impersonated_user_email}. Instead got {about.get('user', {}).get('emailAddress')}"
             )
         return service
 
@@ -57,7 +59,11 @@ class GoogleDriveManager:
         Creates a shared drive and returns the drive's ID
         """
         try:
-            about = drive_service.about().get(fields="user").execute()
+            about = (
+                drive_service.about()  # ty: ignore[unresolved-attribute]
+                .get(fields="user")
+                .execute()
+            )
             creating_user = about["user"]["emailAddress"]
 
             # Verify we're still impersonating the admin
@@ -70,7 +76,7 @@ class GoogleDriveManager:
 
             request_id = str(uuid4())
             drive = (
-                drive_service.drives()
+                drive_service.drives()  # ty: ignore[unresolved-attribute]
                 .create(
                     body=drive_metadata,
                     requestId=request_id,
@@ -111,7 +117,7 @@ class GoogleDriveManager:
     ) -> None:
         docs_service = _create_doc_service(drive_service)
 
-        docs_service.documents().batchUpdate(
+        docs_service.documents().batchUpdate(  # ty: ignore[unresolved-attribute]
             documentId=doc_id,
             body={
                 "requests": [{"insertText": {"location": {"index": 1}, "text": text}}]
@@ -131,7 +137,11 @@ class GoogleDriveManager:
         ).execute()
 
     @staticmethod
-    def remove_file_permissions(drive_service: Any, file_id: str, email: str) -> None:
+    def remove_file_permissions(
+        drive_service: Any,
+        file_id: str,
+        email: str,  # noqa: ARG004
+    ) -> None:
         permissions = (
             drive_service.permissions()
             .list(fileId=file_id, supportsAllDrives=True)

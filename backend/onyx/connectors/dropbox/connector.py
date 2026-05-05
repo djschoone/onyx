@@ -2,10 +2,10 @@ from datetime import timezone
 from io import BytesIO
 from typing import Any
 
-from dropbox import Dropbox  # type: ignore[import-untyped]
-from dropbox.exceptions import ApiError  # type: ignore[import-untyped]
+from dropbox import Dropbox
+from dropbox.exceptions import ApiError
 from dropbox.exceptions import AuthError
-from dropbox.files import FileMetadata  # type: ignore[import-untyped]
+from dropbox.files import FileMetadata
 from dropbox.files import FolderMetadata
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
@@ -19,10 +19,10 @@ from onyx.connectors.interfaces import PollConnector
 from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.utils.logger import setup_logger
-
 
 logger = setup_logger()
 
@@ -80,7 +80,7 @@ class DropboxConnector(LoadConnector, PollConnector):
         )
 
         while True:
-            batch: list[Document] = []
+            batch: list[Document | HierarchyNode] = []
             for entry in result.entries:
                 if isinstance(entry, FileMetadata):
                     modified_time = entry.client_modified

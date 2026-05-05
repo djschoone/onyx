@@ -1,4 +1,3 @@
-from typing import cast
 from typing import Generic
 from typing import TypeVar
 
@@ -28,7 +27,7 @@ def load_everything_from_checkpoint_connector(
     end: SecondsSinceUnixEpoch,
 ) -> list[SingleConnectorCallOutput[CT]]:
 
-    checkpoint = cast(CT, connector.build_dummy_checkpoint())
+    checkpoint = connector.build_dummy_checkpoint()
     return load_everything_from_checkpoint_connector_from_checkpoint(
         connector, start, end, checkpoint
     )
@@ -47,7 +46,9 @@ def load_everything_from_checkpoint_connector_from_checkpoint(
         doc_batch_generator = CheckpointOutputWrapper[CT]()(
             connector.load_from_checkpoint(start, end, checkpoint)
         )
-        for document, failure, next_checkpoint in doc_batch_generator:
+        for document, hierarchy_node, failure, next_checkpoint in doc_batch_generator:
+            if hierarchy_node is not None:
+                continue
             if failure is not None:
                 items.append(failure)
             if document is not None:

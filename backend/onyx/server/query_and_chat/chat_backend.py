@@ -1,6 +1,5 @@
 import datetime
 import json
-import os
 from collections.abc import Generator
 from datetime import timedelta
 from uuid import UUID
@@ -13,30 +12,34 @@ from fastapi import Request
 from fastapi import Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from redis.client import Redis
 from sqlalchemy.orm import Session
 
+from onyx.access.access import user_can_access_chat_file
+from onyx.auth.api_key import get_hashed_api_key_from_request
+from onyx.auth.pat import get_hashed_pat_from_request
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_chat_accessible_user
-from onyx.auth.users import current_user
+from onyx.cache.factory import get_cache_backend
+from onyx.chat.chat_processing_checker import is_chat_session_processing
 from onyx.chat.chat_state import ChatStateContainer
+from onyx.chat.chat_utils import convert_chat_history_basic
 from onyx.chat.chat_utils import create_chat_history_chain
 from onyx.chat.chat_utils import create_chat_session_from_request
 from onyx.chat.chat_utils import extract_headers
 from onyx.chat.models import ChatFullResponse
 from onyx.chat.models import CreateChatSessionID
 from onyx.chat.process_message import gather_stream_full
+from onyx.chat.process_message import handle_multi_model_stream
 from onyx.chat.process_message import handle_stream_message_objects
-from onyx.chat.process_message import stream_chat_message_objects
 from onyx.chat.prompt_utils import get_default_base_system_prompt
 from onyx.chat.stop_signal_checker import set_fence
 from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.configs.chat_configs import HARD_DELETE_CHATS
 from onyx.configs.constants import MessageType
 from onyx.configs.constants import MilestoneRecordType
+from onyx.configs.constants import PUBLIC_API_TAGS
 from onyx.configs.model_configs import LITELLM_PASS_THROUGH_HEADERS
 from onyx.db.chat import add_chats_to_session_from_slack_thread
-from onyx.db.chat import create_chat_session
-from onyx.db.chat import create_new_chat_message
 from onyx.db.chat import delete_all_chat_sessions_for_user
 from onyx.db.chat import delete_chat_session
 from onyx.db.chat import duplicate_chat_session_for_user_from_slack
@@ -44,33 +47,31 @@ from onyx.db.chat import get_chat_message
 from onyx.db.chat import get_chat_messages_by_session
 from onyx.db.chat import get_chat_session_by_id
 from onyx.db.chat import get_chat_sessions_by_user
-from onyx.db.chat import get_or_create_root_message
 from onyx.db.chat import set_as_latest_chat_message
+from onyx.db.chat import set_preferred_response
 from onyx.db.chat import translate_db_message_to_chat_message_detail
 from onyx.db.chat import update_chat_session
 from onyx.db.chat_search import search_chat_sessions
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
+from onyx.db.enums import Permission
 from onyx.db.feedback import create_chat_message_feedback
-from onyx.db.feedback import create_doc_retrieval_feedback
 from onyx.db.feedback import remove_chat_message_feedback
+from onyx.db.models import ChatSessionSharedStatus
 from onyx.db.models import Persona
 from onyx.db.models import User
 from onyx.db.persona import get_persona_by_id
 from onyx.db.usage import increment_usage
 from onyx.db.usage import UsageType
 from onyx.db.user_file import get_file_id_by_user_file_id
-from onyx.file_processing.extract_file_text import docx_to_txt_filename
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_store.file_store import get_default_file_store
 from onyx.llm.constants import LlmProviderNames
 from onyx.llm.factory import get_default_llm
 from onyx.llm.factory import get_llm_for_persona
 from onyx.llm.factory import get_llm_token_counter
-from onyx.natural_language_processing.utils import get_tokenizer
-from onyx.redis.redis_pool import get_redis_client
-from onyx.secondary_llm_flows.chat_session_naming import (
-    get_renamed_conversation_name,
-)
+from onyx.secondary_llm_flows.chat_session_naming import generate_chat_session_name
 from onyx.server.api_key_usage import check_api_key_usage
 from onyx.server.query_and_chat.models import ChatFeedbackRequest
 from onyx.server.query_and_chat.models import ChatMessageIdentifier
@@ -83,12 +84,10 @@ from onyx.server.query_and_chat.models import ChatSessionGroup
 from onyx.server.query_and_chat.models import ChatSessionsResponse
 from onyx.server.query_and_chat.models import ChatSessionSummary
 from onyx.server.query_and_chat.models import ChatSessionUpdateRequest
-from onyx.server.query_and_chat.models import CreateChatMessageRequest
-from onyx.server.query_and_chat.models import LLMOverride
-from onyx.server.query_and_chat.models import PromptOverride
+from onyx.server.query_and_chat.models import MessageOrigin
 from onyx.server.query_and_chat.models import RenameChatSessionResponse
-from onyx.server.query_and_chat.models import SearchFeedbackRequest
 from onyx.server.query_and_chat.models import SendMessageRequest
+from onyx.server.query_and_chat.models import SetPreferredResponseRequest
 from onyx.server.query_and_chat.models import UpdateChatSessionTemperatureRequest
 from onyx.server.query_and_chat.models import UpdateChatSessionThreadRequest
 from onyx.server.query_and_chat.session_loading import (
@@ -96,9 +95,11 @@ from onyx.server.query_and_chat.session_loading import (
 )
 from onyx.server.query_and_chat.streaming_models import Packet
 from onyx.server.query_and_chat.token_limit import check_token_rate_limits
+from onyx.server.usage_limits import check_llm_cost_limit_for_provider
 from onyx.server.usage_limits import check_usage_and_raise
 from onyx.server.usage_limits import is_usage_limits_enabled
 from onyx.server.utils import get_json_line
+from onyx.tracing.framework.create import ensure_trace
 from onyx.utils.headers import get_custom_tool_additional_request_headers
 from onyx.utils.logger import setup_logger
 from onyx.utils.telemetry import mt_cloud_telemetry
@@ -112,7 +113,7 @@ router = APIRouter(prefix="/chat")
 def _get_available_tokens_for_persona(
     persona: Persona,
     db_session: Session,
-    user: User | None,
+    user: User,
 ) -> int:
     def _get_non_reserved_input_tokens(
         model_max_input_tokens: int,
@@ -148,26 +149,43 @@ def _get_available_tokens_for_persona(
     )
 
 
-@router.get("/get-user-chat-sessions")
+@router.get("/get-user-chat-sessions", tags=PUBLIC_API_TAGS)
 def get_user_chat_sessions(
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
     project_id: int | None = None,
     only_non_project_chats: bool = True,
+    include_failed_chats: bool = False,
+    page_size: int = Query(default=50, ge=1, le=100),
+    before: str | None = Query(default=None),
 ) -> ChatSessionsResponse:
-    user_id = user.id if user is not None else None
+    user_id = user.id
 
     try:
+        before_dt = (
+            datetime.datetime.fromisoformat(before) if before is not None else None
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid 'before' timestamp format")
+
+    try:
+        # Fetch one extra to determine if there are more results
         chat_sessions = get_chat_sessions_by_user(
             user_id=user_id,
             deleted=False,
             db_session=db_session,
             project_id=project_id,
             only_non_project_chats=only_non_project_chats,
+            include_failed_chats=include_failed_chats,
+            limit=page_size + 1,
+            before=before_dt,
         )
 
     except ValueError:
         raise ValueError("Chat session does not exist or has been deleted")
+
+    has_more = len(chat_sessions) > page_size
+    chat_sessions = chat_sessions[:page_size]
 
     return ChatSessionsResponse(
         sessions=[
@@ -182,19 +200,20 @@ def get_user_chat_sessions(
                 current_temperature_override=chat.temperature_override,
             )
             for chat in chat_sessions
-        ]
+        ],
+        has_more=has_more,
     )
 
 
 @router.put("/update-chat-session-temperature")
 def update_chat_session_temperature(
     update_thread_req: UpdateChatSessionTemperatureRequest,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     chat_session = get_chat_session_by_id(
         chat_session_id=update_thread_req.chat_session_id,
-        user_id=user.id if user is not None else None,
+        user_id=user.id,
         db_session=db_session,
     )
 
@@ -229,12 +248,12 @@ def update_chat_session_temperature(
 @router.put("/update-chat-session-model")
 def update_chat_session_model(
     update_thread_req: UpdateChatSessionThreadRequest,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     chat_session = get_chat_session_by_id(
         chat_session_id=update_thread_req.chat_session_id,
-        user_id=user.id if user is not None else None,
+        user_id=user.id,
         db_session=db_session,
     )
     chat_session.current_alternate_model = update_thread_req.new_alternate_model
@@ -243,15 +262,15 @@ def update_chat_session_model(
     db_session.commit()
 
 
-@router.get("/get-chat-session/{session_id}")
+@router.get("/get-chat-session/{session_id}", tags=PUBLIC_API_TAGS)
 def get_chat_session(
     session_id: UUID,
     is_shared: bool = False,
     include_deleted: bool = False,
-    user: User | None = Depends(current_chat_accessible_user),
+    user: User = Depends(current_chat_accessible_user),
     db_session: Session = Depends(get_session),
 ) -> ChatSessionDetailResponse:
-    user_id = user.id if user is not None else None
+    user_id = user.id
     try:
         chat_session = get_chat_session_by_id(
             chat_session_id=session_id,
@@ -261,7 +280,35 @@ def get_chat_session(
             include_deleted=include_deleted,
         )
     except ValueError:
-        raise ValueError("Chat session does not exist or has been deleted")
+        try:
+            # If we failed to get a chat session, try to retrieve the session with
+            # less restrictive filters in order to identify what exactly mismatched
+            # so we can bubble up an accurate error code andmessage.
+            existing_chat_session = get_chat_session_by_id(
+                chat_session_id=session_id,
+                user_id=None,
+                db_session=db_session,
+                is_shared=False,
+                include_deleted=True,
+            )
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Chat session not found")
+
+        if not include_deleted and existing_chat_session.deleted:
+            raise HTTPException(status_code=404, detail="Chat session has been deleted")
+
+        if is_shared:
+            if existing_chat_session.shared_status != ChatSessionSharedStatus.PUBLIC:
+                raise HTTPException(
+                    status_code=403, detail="Chat session is not shared"
+                )
+        elif user_id is not None and existing_chat_session.user_id not in (
+            user_id,
+            None,
+        ):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        raise HTTPException(status_code=404, detail="Chat session not found")
 
     # for chat-seeding: if the session is unassigned, assign it now. This is done here
     # to avoid another back and forth between FE -> BE before starting the first
@@ -285,6 +332,18 @@ def get_chat_session(
     chat_message_details = [
         translate_db_message_to_chat_message_detail(msg) for msg in session_messages
     ]
+
+    try:
+        is_processing = is_chat_session_processing(session_id, get_cache_backend())
+        # Edit the last message to indicate loading (Overriding default message value)
+        if is_processing and chat_message_details:
+            last_msg = chat_message_details[-1]
+            if last_msg.message_type == MessageType.ASSISTANT:
+                last_msg.message = "Message is loading... Please refresh the page soon."
+    except Exception:
+        logger.exception(
+            "An error occurred while checking if the chat session is processing"
+        )
 
     # Every assistant message might have a set of tool calls associated with it, these need to be replayed back for the frontend
     # Each list is the set of tool calls for the given assistant message.
@@ -310,27 +369,26 @@ def get_chat_session(
         shared_status=chat_session.shared_status,
         current_temperature_override=chat_session.temperature_override,
         deleted=chat_session.deleted,
+        owner_name=chat_session.user.personal_name if chat_session.user else None,
         # Packets are now directly serialized as Packet Pydantic models
         packets=replay_packet_lists,
     )
 
 
-@router.post("/create-chat-session")
+@router.post("/create-chat-session", tags=PUBLIC_API_TAGS)
 def create_new_chat_session(
     chat_session_creation_request: ChatSessionCreationRequest,
-    user: User | None = Depends(current_chat_accessible_user),
+    user: User = Depends(current_chat_accessible_user),
     db_session: Session = Depends(get_session),
 ) -> CreateChatSessionID:
-    user_id = user.id if user is not None else None
-
     try:
         new_chat_session = create_chat_session_from_request(
             chat_session_request=chat_session_creation_request,
-            user_id=user_id,
+            user=user,
             db_session=db_session,
         )
     except ValueError as e:
-        # Project access denied
+        # Project or persona access denied
         raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         logger.exception(e)
@@ -343,12 +401,16 @@ def create_new_chat_session(
 def rename_chat_session(
     rename_req: ChatRenameRequest,
     request: Request,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> RenameChatSessionResponse:
+    # 3000 tokens is more than enough for a pair of messages which is enough to provide the required context for generating a
+    # good name for the chat session. It's also small enough to fit on even the worst context window LLMs.
+    max_tokens_for_naming = 3000
+
     name = rename_req.name
     chat_session_id = rename_req.chat_session_id
-    user_id = user.id if user is not None else None
+    user_id = user.id
 
     if name:
         update_chat_session(
@@ -359,18 +421,11 @@ def rename_chat_session(
         )
         return RenameChatSessionResponse(new_name=name)
 
-    full_history = create_chat_history_chain(
-        chat_session_id=chat_session_id, db_session=db_session
-    )
-
     llm = get_default_llm(
         additional_headers=extract_headers(
             request.headers, LITELLM_PASS_THROUGH_HEADERS
         )
     )
-
-    # Check LLM cost limits before using the LLM (only for Onyx-managed keys)
-    from onyx.server.usage_limits import check_llm_cost_limit_for_provider
 
     check_llm_cost_limit_for_provider(
         db_session=db_session,
@@ -378,7 +433,28 @@ def rename_chat_session(
         llm_provider_api_key=llm.config.api_key,
     )
 
-    new_name = get_renamed_conversation_name(full_history=full_history, llm=llm)
+    full_history = create_chat_history_chain(
+        chat_session_id=chat_session_id, db_session=db_session
+    )
+
+    token_counter = get_llm_token_counter(llm)
+
+    simple_chat_history = convert_chat_history_basic(
+        chat_history=full_history,
+        token_counter=token_counter,
+        max_individual_message_tokens=max_tokens_for_naming,
+        max_total_tokens=max_tokens_for_naming,
+    )
+
+    with ensure_trace(
+        "chat_session_naming",
+        group_id=str(chat_session_id),
+        metadata={
+            "tenant_id": get_current_tenant_id(),
+            "chat_session_id": str(chat_session_id),
+        },
+    ):
+        new_name = generate_chat_session_name(chat_history=simple_chat_history, llm=llm)
 
     update_chat_session(
         db_session=db_session,
@@ -394,10 +470,10 @@ def rename_chat_session(
 def patch_chat_session(
     session_id: UUID,
     chat_session_update_req: ChatSessionUpdateRequest,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
-    user_id = user.id if user is not None else None
+    user_id = user.id
     update_chat_session(
         db_session=db_session,
         user_id=user_id,
@@ -407,9 +483,9 @@ def patch_chat_session(
     return None
 
 
-@router.delete("/delete-all-chat-sessions")
+@router.delete("/delete-all-chat-sessions", tags=PUBLIC_API_TAGS)
 def delete_all_chat_sessions(
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     try:
@@ -418,14 +494,14 @@ def delete_all_chat_sessions(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/delete-chat-session/{session_id}")
+@router.delete("/delete-chat-session/{session_id}", tags=PUBLIC_API_TAGS)
 def delete_chat_session_by_id(
     session_id: UUID,
     hard_delete: bool | None = None,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
-    user_id = user.id if user is not None else None
+    user_id = user.id
     try:
         # Use the provided hard_delete parameter if specified, otherwise use the default config
         actual_hard_delete = (
@@ -438,76 +514,36 @@ def delete_chat_session_by_id(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# WARNING: this endpoint is deprecated and will be removed soon. Use the new send-chat-message endpoint instead.
-@router.post("/send-message")
-def handle_new_chat_message(
-    chat_message_req: CreateChatMessageRequest,
-    request: Request,
-    user: User | None = Depends(current_chat_accessible_user),
-    _rate_limit_check: None = Depends(check_token_rate_limits),
-    _api_key_usage_check: None = Depends(check_api_key_usage),
-) -> StreamingResponse:
-    """
-    This endpoint is both used for all the following purposes:
-    - Sending a new message in the session
-    - Regenerating a message in the session (just send the same one again)
-    - Editing a message (similar to regenerating but sending a different message)
-    - Kicking off a seeded chat session (set `use_existing_user_message`)
-
-    Assumes that previous messages have been set as the latest to minimize overhead.
-
-    Args:
-        chat_message_req (CreateChatMessageRequest): Details about the new chat message.
-        request (Request): The current HTTP request context.
-        user (User | None): The current user, obtained via dependency injection.
-        _ (None): Rate limit check is run if user/group/global rate limits are enabled.
-
-    Returns:
-        StreamingResponse: Streams the response to the new chat message.
-    """
-    tenant_id = get_current_tenant_id()
-    logger.debug(f"Received new chat message: {chat_message_req.message}")
-
-    if not chat_message_req.message and not chat_message_req.use_existing_user_message:
-        raise HTTPException(status_code=400, detail="Empty chat message is invalid")
-
-    mt_cloud_telemetry(
-        tenant_id=tenant_id,
-        distinct_id=user.email if user else tenant_id,
-        event=MilestoneRecordType.RAN_QUERY,
-    )
-
-    def stream_generator() -> Generator[str, None, None]:
-        try:
-            with get_session_with_current_tenant() as db_session:
-                for obj in stream_chat_message_objects(
-                    new_msg_req=chat_message_req,
-                    user=user,
-                    db_session=db_session,
-                    litellm_additional_headers=extract_headers(
-                        request.headers, LITELLM_PASS_THROUGH_HEADERS
-                    ),
-                    custom_tool_additional_headers=get_custom_tool_additional_request_headers(
-                        request.headers
-                    ),
-                ):
-                    yield get_json_line(obj.model_dump())
-
-        except Exception as e:
-            logger.exception("Error in chat message streaming")
-            yield json.dumps({"error": str(e)})
-
-        finally:
-            logger.debug("Stream generator finished")
-
-    return StreamingResponse(stream_generator(), media_type="text/event-stream")
-
-
-@router.post("/send-chat-message", response_model=None)
+# NOTE: This endpoint is extremely central to the application, any changes to it should be reviewed and approved by an experienced
+# team member. It is very important to 1. avoid bloat and 2. that this remains backwards compatible across versions.
+@router.post(
+    "/send-chat-message",
+    response_model=ChatFullResponse,
+    tags=PUBLIC_API_TAGS,
+    responses={
+        200: {
+            "description": (
+                "If `stream=true`, returns `text/event-stream`.\n"
+                "If `stream=false`, returns `application/json` (ChatFullResponse)."
+            ),
+            "content": {
+                "text/event-stream": {
+                    "schema": {"type": "string"},
+                    "examples": {
+                        "stream": {
+                            "summary": "Stream of NDJSON AnswerStreamPart's",
+                            "value": "string",
+                        }
+                    },
+                },
+            },
+        }
+    },
+)
 def handle_send_chat_message(
     chat_message_req: SendMessageRequest,
     request: Request,
-    user: User | None = Depends(current_chat_accessible_user),
+    user: User = Depends(current_chat_accessible_user),
     _rate_limit_check: None = Depends(check_token_rate_limits),
     _api_key_usage_check: None = Depends(check_api_key_usage),
 ) -> StreamingResponse | ChatFullResponse:
@@ -519,7 +555,7 @@ def handle_send_chat_message(
             - When stream=True (default): Returns StreamingResponse with SSE
             - When stream=False: Returns ChatFullResponse with complete data
         request (Request): The current HTTP request context.
-        user (User | None): The current user, obtained via dependency injection.
+        user (User): The current user, obtained via dependency injection.
         _ (None): Rate limit check is run if user/group/global rate limits are enabled.
 
     Returns:
@@ -530,9 +566,54 @@ def handle_send_chat_message(
     tenant_id = get_current_tenant_id()
     mt_cloud_telemetry(
         tenant_id=tenant_id,
-        distinct_id=user.email if user else tenant_id,
+        distinct_id=tenant_id if user.is_anonymous else str(user.id),
         event=MilestoneRecordType.RAN_QUERY,
     )
+
+    # Override origin to API when authenticated via API key or PAT
+    # to prevent clients from polluting telemetry data
+    if get_hashed_api_key_from_request(request) or get_hashed_pat_from_request(request):
+        chat_message_req.origin = MessageOrigin.API
+
+    # Multi-model streaming path: 2-3 LLMs in parallel (streaming only)
+    is_multi_model = (
+        chat_message_req.llm_overrides is not None
+        and len(chat_message_req.llm_overrides) > 1
+    )
+    if is_multi_model and chat_message_req.stream:
+        # Narrowed here; is_multi_model already checked llm_overrides is not None
+        llm_overrides = chat_message_req.llm_overrides or []
+
+        def multi_model_stream_generator() -> Generator[str, None, None]:
+            try:
+                with get_session_with_current_tenant() as db_session:
+                    for obj in handle_multi_model_stream(
+                        new_msg_req=chat_message_req,
+                        user=user,
+                        db_session=db_session,
+                        llm_overrides=llm_overrides,
+                        litellm_additional_headers=extract_headers(
+                            request.headers, LITELLM_PASS_THROUGH_HEADERS
+                        ),
+                        custom_tool_additional_headers=get_custom_tool_additional_request_headers(
+                            request.headers
+                        ),
+                        mcp_headers=chat_message_req.mcp_headers,
+                    ):
+                        yield get_json_line(obj.model_dump())
+            except Exception as e:
+                logger.exception("Error in multi-model streaming")
+                yield json.dumps({"error": str(e)})
+
+        return StreamingResponse(
+            multi_model_stream_generator(), media_type="text/event-stream"
+        )
+
+    if is_multi_model and not chat_message_req.stream:
+        raise OnyxError(
+            OnyxErrorCode.INVALID_INPUT,
+            "Multi-model mode (llm_overrides with >1 entry) requires stream=True.",
+        )
 
     # Non-streaming path: consume all packets and return complete response
     if not chat_message_req.stream:
@@ -563,6 +644,8 @@ def handle_send_chat_message(
                 custom_tool_additional_headers=get_custom_tool_additional_request_headers(
                     request.headers
                 ),
+                mcp_headers=chat_message_req.mcp_headers,
+                additional_context=chat_message_req.additional_context,
                 external_state_container=state_container,
             )
             result = gather_stream_full(packets, state_container)
@@ -584,6 +667,8 @@ def handle_send_chat_message(
                     custom_tool_additional_headers=get_custom_tool_additional_request_headers(
                         request.headers
                     ),
+                    mcp_headers=chat_message_req.mcp_headers,
+                    additional_context=chat_message_req.additional_context,
                     external_state_container=state_container,
                 ):
                     yield get_json_line(obj.model_dump())
@@ -602,10 +687,10 @@ def handle_send_chat_message(
 @router.put("/set-message-as-latest")
 def set_message_as_latest(
     message_identifier: ChatMessageIdentifier,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
-    user_id = user.id if user is not None else None
+    user_id = user.id
 
     chat_message = get_chat_message(
         chat_message_id=message_identifier.message_id,
@@ -620,13 +705,37 @@ def set_message_as_latest(
     )
 
 
+@router.put("/set-preferred-response")
+def set_preferred_response_endpoint(
+    request_body: SetPreferredResponseRequest,
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    db_session: Session = Depends(get_session),
+) -> None:
+    """Set the preferred assistant response for a multi-model turn."""
+    try:
+        # Ownership check: get_chat_message raises ValueError if the message
+        # doesn't belong to this user, preventing cross-user mutation.
+        get_chat_message(
+            chat_message_id=request_body.user_message_id,
+            user_id=user.id,
+            db_session=db_session,
+        )
+        set_preferred_response(
+            db_session=db_session,
+            user_message_id=request_body.user_message_id,
+            preferred_assistant_message_id=request_body.preferred_response_id,
+        )
+    except ValueError as e:
+        raise OnyxError(OnyxErrorCode.INVALID_INPUT, str(e))
+
+
 @router.post("/create-chat-message-feedback")
 def create_chat_feedback(
     feedback: ChatFeedbackRequest,
-    user: User | None = Depends(current_chat_accessible_user),
+    user: User = Depends(current_chat_accessible_user),
     db_session: Session = Depends(get_session),
 ) -> None:
-    user_id = user.id if user else None
+    user_id = user.id
 
     create_chat_message_feedback(
         is_positive=feedback.is_positive,
@@ -641,33 +750,14 @@ def create_chat_feedback(
 @router.delete("/remove-chat-message-feedback")
 def remove_chat_feedback(
     chat_message_id: int,
-    user: User | None = Depends(current_chat_accessible_user),
+    user: User = Depends(current_chat_accessible_user),
     db_session: Session = Depends(get_session),
 ) -> None:
-    user_id = user.id if user else None
+    user_id = user.id
 
     remove_chat_message_feedback(
         chat_message_id=chat_message_id,
         user_id=user_id,
-        db_session=db_session,
-    )
-
-
-@router.post("/document-search-feedback")
-def create_search_feedback(
-    feedback: SearchFeedbackRequest,
-    _: User | None = Depends(current_user),
-    db_session: Session = Depends(get_session),
-) -> None:
-    """This endpoint isn't protected - it does not check if the user has access to the document
-    Users could try changing boosts of arbitrary docs but this does not leak any data.
-    """
-    create_doc_retrieval_feedback(
-        message_id=feedback.message_id,
-        document_id=feedback.document_id,
-        document_rank=feedback.document_rank,
-        clicked=feedback.click,
-        feedback=feedback.search_feedback,
         db_session=db_session,
     )
 
@@ -679,7 +769,7 @@ class MaxSelectedDocumentTokens(BaseModel):
 @router.get("/max-selected-document-tokens")
 def get_max_document_tokens(
     persona_id: int,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> MaxSelectedDocumentTokens:
     try:
@@ -708,7 +798,7 @@ class AvailableContextTokensResponse(BaseModel):
 @router.get("/available-context-tokens/{session_id}")
 def get_available_context_tokens_for_session(
     session_id: UUID,
-    user: User | None = Depends(current_chat_accessible_user),
+    user: User = Depends(current_chat_accessible_user),
     db_session: Session = Depends(get_session),
 ) -> AvailableContextTokensResponse:
     """Return available context tokens for a chat session based on its persona."""
@@ -716,7 +806,7 @@ def get_available_context_tokens_for_session(
     try:
         chat_session = get_chat_session_by_id(
             chat_session_id=session_id,
-            user_id=user.id if user else None,
+            user_id=user.id,
             db_session=db_session,
             is_shared=False,
             include_deleted=False,
@@ -739,77 +829,6 @@ def get_available_context_tokens_for_session(
 """Endpoints for chat seeding"""
 
 
-class ChatSeedRequest(BaseModel):
-    # standard chat session stuff
-    persona_id: int
-
-    # overrides / seeding
-    llm_override: LLMOverride | None = None
-    prompt_override: PromptOverride | None = None
-    description: str | None = None
-    message: str | None = None
-
-    # TODO: support this
-    # initial_message_retrieval_options: RetrievalDetails | None = None
-
-
-class ChatSeedResponse(BaseModel):
-    redirect_url: str
-
-
-@router.post("/seed-chat-session")
-def seed_chat(
-    chat_seed_request: ChatSeedRequest,
-    # NOTE: This endpoint is designed for programmatic access (API keys, external services)
-    # rather than authenticated user sessions. The user parameter is used for access control
-    # but the created chat session is "unassigned" (user_id=None) until a user visits the web UI.
-    # This allows external systems to pre-seed chat sessions that users can then access.
-    user: User | None = Depends(current_chat_accessible_user),
-    db_session: Session = Depends(get_session),
-) -> ChatSeedResponse:
-
-    try:
-        new_chat_session = create_chat_session(
-            db_session=db_session,
-            description=chat_seed_request.description or "",
-            user_id=None,  # this chat session is "unassigned" until a user visits the web UI
-            persona_id=chat_seed_request.persona_id,
-            llm_override=chat_seed_request.llm_override,
-            prompt_override=chat_seed_request.prompt_override,
-        )
-    except Exception as e:
-        logger.exception(e)
-        raise HTTPException(status_code=400, detail="Invalid Persona provided.")
-
-    if chat_seed_request.message is not None:
-        root_message = get_or_create_root_message(
-            chat_session_id=new_chat_session.id, db_session=db_session
-        )
-        llm = get_llm_for_persona(
-            persona=new_chat_session.persona,
-            user=user,
-        )
-
-        tokenizer = get_tokenizer(
-            model_name=llm.config.model_name,
-            provider_type=llm.config.model_provider,
-        )
-        token_count = len(tokenizer.encode(chat_seed_request.message))
-
-        create_new_chat_message(
-            chat_session_id=new_chat_session.id,
-            parent_message=root_message,
-            message=chat_seed_request.message,
-            token_count=token_count,
-            message_type=MessageType.USER,
-            db_session=db_session,
-        )
-
-    return ChatSeedResponse(
-        redirect_url=f"{WEB_DOMAIN}/chat?chatId={new_chat_session.id}&seeded=true"
-    )
-
-
 class SeedChatFromSlackRequest(BaseModel):
     chat_session_id: UUID
 
@@ -821,7 +840,7 @@ class SeedChatFromSlackResponse(BaseModel):
 @router.post("/seed-chat-session-from-slack")
 def seed_chat_from_slack(
     chat_seed_request: SeedChatFromSlackRequest,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> SeedChatFromSlackResponse:
     slack_chat_session_id = chat_seed_request.chat_session_id
@@ -842,35 +861,27 @@ def seed_chat_from_slack(
     )
 
 
-@router.get("/file/{file_id:path}")
+@router.get("/file/{file_id:path}", tags=PUBLIC_API_TAGS)
 def fetch_chat_file(
     file_id: str,
     request: Request,
-    _: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> Response:
 
     # For user files, we need to get the file id from the user file id
-    file_id_from_user_file = get_file_id_by_user_file_id(file_id, db_session)
+    file_id_from_user_file = get_file_id_by_user_file_id(file_id, user.id, db_session)
     if file_id_from_user_file:
         file_id = file_id_from_user_file
+    elif not user_can_access_chat_file(file_id, user, db_session):
+        # Return 404 (rather than 403) so callers cannot probe for file
+        # existence across ownership boundaries.
+        raise OnyxError(OnyxErrorCode.NOT_FOUND, "File not found")
 
     file_store = get_default_file_store()
     file_record = file_store.read_file_record(file_id)
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found")
-
-    original_file_name = file_record.display_name
-    if file_record.file_type.startswith(
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ):
-        # Check if a converted text file exists for .docx files
-        txt_file_name = docx_to_txt_filename(original_file_name)
-        txt_file_id = os.path.join(os.path.dirname(file_id), txt_file_name)
-        txt_file_record = file_store.read_file_record(txt_file_id)
-        if txt_file_record:
-            file_record = txt_file_record
-            file_id = txt_file_id
 
     media_type = file_record.file_type
     file_io = file_store.read_file(file_id, mode="b")
@@ -890,12 +901,12 @@ def fetch_chat_file(
     return StreamingResponse(file_io, media_type=media_type, headers=cache_headers)
 
 
-@router.get("/search")
+@router.get("/search", tags=PUBLIC_API_TAGS)
 async def search_chats(
     query: str | None = Query(None),
     page: int = Query(1),
     page_size: int = Query(10),
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> ChatSearchResponse:
     """
@@ -905,7 +916,7 @@ async def search_chats(
 
     # Use the enhanced database function for chat search
     chat_sessions, has_more = search_chat_sessions(
-        user_id=user.id if user else None,
+        user_id=user.id,
         db_session=db_session,
         query=query,
         page=page,
@@ -970,15 +981,24 @@ async def search_chats(
     )
 
 
-@router.post("/stop-chat-session/{chat_session_id}")
+@router.post("/stop-chat-session/{chat_session_id}", tags=PUBLIC_API_TAGS)
 def stop_chat_session(
     chat_session_id: UUID,
-    user: User | None = Depends(current_user),
-    redis_client: Redis = Depends(get_redis_client),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    db_session: Session = Depends(get_session),
 ) -> dict[str, str]:
     """
-    Stop a chat session by setting a stop signal in Redis.
+    Stop a chat session by setting a stop signal.
     This endpoint is called by the frontend when the user clicks the stop button.
     """
-    set_fence(chat_session_id, redis_client, True)
+    try:
+        get_chat_session_by_id(
+            chat_session_id=chat_session_id,
+            user_id=user.id,
+            db_session=db_session,
+        )
+    except ValueError:
+        raise OnyxError(OnyxErrorCode.SESSION_NOT_FOUND, "Chat session not found")
+
+    set_fence(chat_session_id, get_cache_backend(), True)
     return {"message": "Chat session stopped"}

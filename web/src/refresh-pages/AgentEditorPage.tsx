@@ -1,29 +1,33 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import * as SettingsLayouts from "@/layouts/settings-layouts";
-import Button from "@/refresh-components/buttons/Button";
-import { FullPersona } from "@/app/admin/assistants/interfaces";
-import { buildImgUrl } from "@/app/chat/components/files/images/utils";
-import { cn } from "@/lib/utils";
+import * as GeneralLayouts from "@/layouts/general-layouts";
+import { Button, Card, Divider, MessageCard } from "@opal/components";
+import { Hoverable, Disabled } from "@opal/core";
+import { FullPersona } from "@/app/admin/agents/interfaces";
+import { buildAgentAvatarUrl } from "@/app/app/components/files/images/utils";
 import { Formik, Form, FieldArray } from "formik";
 import * as Yup from "yup";
 import InputTypeInField from "@/refresh-components/form/InputTypeInField";
 import InputTextAreaField from "@/refresh-components/form/InputTextAreaField";
 import InputTypeInElementField from "@/refresh-components/form/InputTypeInElementField";
 import InputDatePickerField from "@/refresh-components/form/InputDatePickerField";
-import Separator from "@/refresh-components/Separator";
-import * as InputLayouts from "@/layouts/input-layouts";
+import {
+  Card as CardLayout,
+  ContentAction,
+  InputHorizontal,
+  InputVertical,
+} from "@opal/layouts";
 import { useFormikContext } from "formik";
 import LLMSelector from "@/components/llm/LLMSelector";
-import { parseLlmDescriptor, structureValue } from "@/lib/llm/utils";
-import { useLLMProviders } from "@/lib/hooks/useLLMProviders";
+import { parseLlmDescriptor, structureValue } from "@/lib/llmConfig/utils";
+import { useLLMProviders } from "@/hooks/useLLMProviders";
 import {
   STARTER_MESSAGES_EXAMPLES,
   MAX_CHARACTERS_STARTER_MESSAGE,
   MAX_CHARACTERS_AGENT_DESCRIPTION,
-  MAX_CHUNKS_FED_TO_CHAT,
 } from "@/lib/constants";
 import {
   IMAGE_GENERATION_TOOL_ID,
@@ -31,40 +35,32 @@ import {
   PYTHON_TOOL_ID,
   SEARCH_TOOL_ID,
   OPEN_URL_TOOL_ID,
-} from "@/app/chat/components/tools/constants";
+} from "@/app/app/components/tools/constants";
 import Text from "@/refresh-components/texts/Text";
-import { Card } from "@/refresh-components/cards";
 import SimpleCollapsible from "@/refresh-components/SimpleCollapsible";
 import SwitchField from "@/refresh-components/form/SwitchField";
-import InputSelectField from "@/refresh-components/form/InputSelectField";
-import InputSelect from "@/refresh-components/inputs/InputSelect";
+import { Tooltip } from "@opal/components";
 import { useDocumentSets } from "@/app/admin/documents/sets/hooks";
-import { useProjectsContext } from "@/app/chat/projects/ProjectsContext";
+import { useProjectsContext } from "@/providers/ProjectsContext";
 import { useCreateModal } from "@/refresh-components/contexts/ModalContext";
-import { usePopup } from "@/components/admin/connectors/Popup";
-import { DocumentSetSelectable } from "@/components/documentSet/DocumentSetSelectable";
-import FilePickerPopover from "@/refresh-components/popovers/FilePickerPopover";
-import { FileCard } from "@/app/chat/components/input/FileCard";
+import { toast } from "@/hooks/useToast";
 import UserFilesModal from "@/components/modals/UserFilesModal";
 import {
   ProjectFile,
   UserFileStatus,
-} from "@/app/chat/projects/projectsService";
-import CreateButton from "@/refresh-components/buttons/CreateButton";
-import {
-  Popover,
-  PopoverTrigger,
-  PopoverContent,
-  PopoverMenu,
-} from "@/components/ui/popover";
+} from "@/app/app/projects/projectsService";
+import Popover, { PopoverMenu } from "@/refresh-components/Popover";
 import LineItem from "@/refresh-components/buttons/LineItem";
 import {
   SvgActions,
   SvgExpand,
   SvgFold,
   SvgImage,
+  SvgLock,
   SvgOnyxOctagon,
   SvgSliders,
+  SvgUsers,
+  SvgTrash,
 } from "@opal/icons";
 import CustomAgentAvatar, {
   agentAvatarIconMap,
@@ -76,19 +72,30 @@ import {
   createPersona,
   updatePersona,
   PersonaUpsertParameters,
-} from "@/app/admin/assistants/lib";
-import useMcpServers from "@/hooks/useMcpServers";
+} from "@/app/admin/agents/lib";
+import useMcpServersForAgentEditor from "@/hooks/useMcpServersForAgentEditor";
 import useOpenApiTools from "@/hooks/useOpenApiTools";
 import { useAvailableTools } from "@/hooks/useAvailableTools";
-import * as ActionsLayouts from "@/layouts/actions-layouts";
-import { useActionsLayout } from "@/layouts/actions-layouts";
 import { getActionIcon } from "@/lib/tools/mcpUtils";
 import { MCPServer, MCPTool, ToolSnapshot } from "@/lib/tools/interfaces";
 import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
 import useFilter from "@/hooks/useFilter";
 import EnabledCount from "@/refresh-components/EnabledCount";
-import useOnMount from "@/hooks/useOnMount";
 import { useAppRouter } from "@/hooks/appNavigation";
+import { isDateInFuture } from "@/lib/dateUtils";
+import {
+  deleteAgent,
+  updateAgentFeaturedStatus,
+  updateAgentSharedStatus,
+} from "@/lib/agents";
+import ConfirmationModalLayout from "@/refresh-components/layouts/ConfirmationModalLayout";
+import ShareAgentModal from "@/sections/modals/ShareAgentModal";
+import AgentKnowledgePane from "@/sections/knowledge/AgentKnowledgePane";
+import { ValidSources } from "@/lib/types";
+import { useVectorDbEnabled } from "@/providers/SettingsProvider";
+import { useUser } from "@/providers/UserProvider";
+import SimpleLoader from "@/refresh-components/loaders/SimpleLoader";
+import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidEnterpriseFeaturesEnabled";
 
 interface AgentIconEditorProps {
   existingAgent?: FullPersona | null;
@@ -169,14 +176,14 @@ function AgentIconEditor({ existingAgent }: AgentIconEditorProps) {
 
   const imageSrc = uploadedImagePreview
     ? uploadedImagePreview
-    : values.uploaded_image_id
-      ? buildImgUrl(values.uploaded_image_id)
+    : values.uploaded_image_id && existingAgent?.id != null
+      ? buildAgentAvatarUrl(existingAgent.id)
       : values.icon_name
         ? undefined
         : values.remove_image
           ? undefined
           : existingAgent?.uploaded_image_id
-            ? buildImgUrl(existingAgent.uploaded_image_id)
+            ? buildAgentAvatarUrl(existingAgent.id)
             : undefined;
 
   function handleIconClick(iconName: string | null) {
@@ -203,25 +210,29 @@ function AgentIconEditor({ existingAgent }: AgentIconEditorProps) {
       />
 
       <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-        <PopoverTrigger asChild>
-          <InputAvatar className="group/InputAvatar relative flex flex-col items-center justify-center h-[7.5rem] w-[7.5rem]">
-            {/* We take the `InputAvatar`'s height/width (in REM) and multiply it by 16 (the REM -> px conversion factor). */}
-            <CustomAgentAvatar
-              size={imageSrc ? 7.5 * 16 : 40}
-              src={imageSrc}
-              iconName={values.icon_name ?? undefined}
-              name={values.name}
-            />
-            <Button
-              className="absolute bottom-0 left-1/2 -translate-x-1/2 h-[1.75rem] mb-2 invisible group-hover/InputAvatar:visible"
-              secondary
-            >
-              Edit
-            </Button>
-          </InputAvatar>
-        </PopoverTrigger>
-        <PopoverContent>
-          <PopoverMenu medium>
+        <Popover.Trigger asChild>
+          <Hoverable.Root group="inputAvatar" width="fit">
+            <InputAvatar className="relative flex flex-col items-center justify-center h-[7.5rem] w-[7.5rem]">
+              {/* We take the `InputAvatar`'s height/width (in REM) and multiply it by 16 (the REM -> px conversion factor). */}
+              <CustomAgentAvatar
+                size={imageSrc ? 7.5 * 16 : 40}
+                src={imageSrc}
+                iconName={values.icon_name ?? undefined}
+                name={values.name}
+              />
+              {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
+              <div className="absolute bottom-0 left-1/2 -translate-x-1/2 mb-2">
+                <Hoverable.Item group="inputAvatar" variant="appear-on-hover">
+                  <Button prominence="secondary" size="md">
+                    Edit
+                  </Button>
+                </Hoverable.Item>
+              </div>
+            </InputAvatar>
+          </Hoverable.Root>
+        </Popover.Trigger>
+        <Popover.Content>
+          <PopoverMenu>
             {[
               <LineItem
                 key="upload-image"
@@ -254,18 +265,9 @@ function AgentIconEditor({ existingAgent }: AgentIconEditorProps) {
               </div>,
             ]}
           </PopoverMenu>
-        </PopoverContent>
+        </Popover.Content>
       </Popover>
     </>
-  );
-}
-
-function Section({
-  className,
-  ...rest
-}: React.HtmlHTMLAttributes<HTMLDivElement>) {
-  return (
-    <div className={cn("flex flex-col gap-4 w-full", className)} {...rest} />
   );
 }
 
@@ -275,21 +277,18 @@ interface OpenApiToolCardProps {
 
 function OpenApiToolCard({ tool }: OpenApiToolCardProps) {
   const toolFieldName = `openapi_tool_${tool.id}`;
-  const actionsLayouts = useActionsLayout();
-
-  useOnMount(() => actionsLayouts.setIsFolded(true));
 
   return (
-    <actionsLayouts.Provider>
-      <ActionsLayouts.Root>
-        <ActionsLayouts.Header
-          title={tool.display_name || tool.name}
-          description={tool.description}
-          icon={SvgActions}
-          rightChildren={<SwitchField name={toolFieldName} />}
-        />
-      </ActionsLayouts.Root>
-    </actionsLayouts.Provider>
+    <Card border="solid" rounding="lg">
+      <InputHorizontal
+        icon={SvgActions}
+        title={tool.display_name || tool.name}
+        description={tool.description}
+        withLabel={toolFieldName}
+      >
+        <SwitchField name={toolFieldName} />
+      </InputHorizontal>
+    </Card>
   );
 }
 
@@ -304,8 +303,8 @@ function MCPServerCard({
   tools: enabledTools,
   isLoading,
 }: MCPServerCardProps) {
-  const actionsLayouts = useActionsLayout();
-  const { values, setFieldValue } = useFormikContext<any>();
+  const [isFolded, setIsFolded] = useState(false);
+  const { values, setFieldValue, getFieldMeta } = useFormikContext<any>();
   const serverFieldName = `mcp_server_${server.id}`;
   const isServerEnabled = values[serverFieldName]?.enabled ?? false;
   const {
@@ -320,78 +319,117 @@ function MCPServerCard({
     return toolFieldValue === true;
   }).length;
 
+  const hasTools = enabledTools.length > 0 && filteredTools.length > 0;
+
+  let cardContent: React.ReactNode | undefined;
+  if (isLoading) {
+    cardContent = (
+      <div className="flex flex-col gap-2 p-2">
+        <GeneralLayouts.Section padding={1}>
+          <SimpleLoader />
+        </GeneralLayouts.Section>
+      </div>
+    );
+  } else if (hasTools) {
+    cardContent = (
+      <GeneralLayouts.Section gap={0.5} padding={0.5}>
+        {filteredTools.map((tool) => {
+          const toolDisabled =
+            !tool.isAvailable ||
+            !getFieldMeta<boolean>(`${serverFieldName}.enabled`).value;
+          return (
+            <Disabled key={tool.id} disabled={toolDisabled}>
+              <Card border="solid" rounding="md" padding="sm">
+                <ContentAction
+                  icon={tool.icon ?? SvgSliders}
+                  title={tool.name}
+                  description={tool.description}
+                  sizePreset="main-ui"
+                  variant="section"
+                  padding="fit"
+                  rightChildren={
+                    <SwitchField
+                      name={`${serverFieldName}.tool_${tool.id}`}
+                      disabled={!isServerEnabled}
+                    />
+                  }
+                />
+              </Card>
+            </Disabled>
+          );
+        })}
+      </GeneralLayouts.Section>
+    );
+  }
+
   return (
-    <actionsLayouts.Provider>
-      <ActionsLayouts.Root>
-        <ActionsLayouts.Header
-          title={server.name}
-          description={server.description ?? server.server_url}
-          icon={getActionIcon(server.server_url, server.name)}
-          rightChildren={
-            <div className="flex flex-row gap-2 items-center justify-center">
-              <EnabledCount
-                enabledCount={enabledCount}
-                totalCount={enabledTools.length}
-              />
-              <SwitchField
-                name={`${serverFieldName}.enabled`}
-                onCheckedChange={(checked) => {
-                  enabledTools.forEach((tool) => {
-                    setFieldValue(
-                      `${serverFieldName}.tool_${tool.id}`,
-                      checked
-                    );
-                  });
-                  if (!checked) return;
-                  actionsLayouts.setIsFolded(false);
-                }}
-              />
-            </div>
-          }
-        >
-          <div className="flex flex-row gap-2 items-center justify-center">
+    <Card
+      expandable
+      expanded={!isFolded}
+      border="solid"
+      rounding="lg"
+      padding="sm"
+      expandedContent={cardContent}
+    >
+      <CardLayout.Header
+        bottomChildren={
+          <GeneralLayouts.Section flexDirection="row" gap={0.5}>
             <InputTypeIn
               placeholder="Search tools..."
-              internal
+              variant="internal"
               leftSearchIcon
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
-            <Button
-              internal
-              rightIcon={actionsLayouts.isFolded ? SvgExpand : SvgFold}
-              onClick={() => actionsLayouts.setIsFolded((prev) => !prev)}
-            >
-              {actionsLayouts.isFolded ? "Expand" : "Fold"}
-            </Button>
-          </div>
-        </ActionsLayouts.Header>
-        <ActionsLayouts.Content>
-          {isLoading ? (
-            <ActionsLayouts.ToolSkeleton />
-          ) : filteredTools.length === 0 ? (
-            <ActionsLayouts.NoToolsFound />
-          ) : (
-            filteredTools.map((tool) => (
-              <ActionsLayouts.Tool
-                key={tool.id}
-                name={`${serverFieldName}.tool_${tool.id}`}
-                title={tool.name}
-                description={tool.description}
-                icon={tool.icon ?? SvgSliders}
-                disabled={!tool.isAvailable}
-                rightChildren={
-                  <SwitchField
-                    name={`${serverFieldName}.tool_${tool.id}`}
-                    disabled={!isServerEnabled}
-                  />
-                }
-              />
-            ))
-          )}
-        </ActionsLayouts.Content>
-      </ActionsLayouts.Root>
-    </actionsLayouts.Provider>
+            {enabledTools.length > 0 && (
+              <Button
+                prominence="internal"
+                rightIcon={isFolded ? SvgExpand : SvgFold}
+                onClick={() => setIsFolded((prev) => !prev)}
+              >
+                {isFolded ? "Expand" : "Fold"}
+              </Button>
+            )}
+          </GeneralLayouts.Section>
+        }
+      >
+        <div className="p-2">
+          <ContentAction
+            icon={getActionIcon(server.server_url, server.name)}
+            title={server.name}
+            description={server.description}
+            sizePreset="main-ui"
+            variant="section"
+            padding="fit"
+            rightChildren={
+              <GeneralLayouts.Section
+                flexDirection="row"
+                gap={0.5}
+                alignItems="start"
+              >
+                <EnabledCount
+                  enabledCount={enabledCount}
+                  totalCount={enabledTools.length}
+                />
+                <SwitchField
+                  name={`${serverFieldName}.enabled`}
+                  onCheckedChange={(checked) => {
+                    enabledTools.forEach((tool) => {
+                      setFieldValue(
+                        `${serverFieldName}.tool_${tool.id}`,
+                        checked
+                      );
+                    });
+                    if (!checked) return;
+                    setIsFolded(false);
+                  }}
+                />
+              </GeneralLayouts.Section>
+            }
+          />
+        </div>
+      </CardLayout.Header>
+    </Card>
   );
 }
 
@@ -420,7 +458,7 @@ function StarterMessages() {
   return (
     <FieldArray name="starter_messages">
       {(arrayHelpers) => (
-        <div className="flex flex-col gap-2">
+        <GeneralLayouts.Section gap={0.5}>
           {Array.from({ length: visibleCount }, (_, i) => (
             <InputTypeInElementField
               key={`starter_messages.${i}`}
@@ -432,7 +470,7 @@ function StarterMessages() {
               onRemove={() => arrayHelpers.remove(i)}
             />
           ))}
-        </div>
+        </GeneralLayouts.Section>
       )}
     </FieldArray>
   );
@@ -449,8 +487,13 @@ export default function AgentEditorPage({
 }: AgentEditorPageProps) {
   const router = useRouter();
   const appRouter = useAppRouter();
-  const { popup, setPopup } = usePopup();
   const { refresh: refreshAgents } = useAgents();
+  const shareAgentModal = useCreateModal();
+  const deleteAgentModal = useCreateModal();
+  const { isAdmin, isCurator } = useUser();
+  const canUpdateFeaturedStatus = isAdmin || isCurator;
+  const vectorDbEnabled = useVectorDbEnabled();
+  const isPaidEnterpriseFeaturesEnabled = usePaidEnterpriseFeaturesEnabled();
 
   // LLM Model Selection
   const getCurrentLlm = useCallback(
@@ -495,8 +538,9 @@ export default function AgentEditorPage({
     semantic_identifier: string;
   } | null>(null);
 
-  const { mcpData } = useMcpServers();
-  const { openApiTools: openApiToolsRaw } = useOpenApiTools();
+  const { mcpData, isLoading: isMcpLoading } = useMcpServersForAgentEditor();
+  const { openApiTools: openApiToolsRaw, isLoading: isOpenApiLoading } =
+    useOpenApiTools();
   const { llmProviders } = useLLMProviders(existingAgent?.id);
   const mcpServers = mcpData?.mcp_servers ?? [];
   const openApiTools = openApiToolsRaw ?? [];
@@ -506,7 +550,8 @@ export default function AgentEditorPage({
   // - image-gen
   // - web-search
   // - code-interpreter
-  const { tools: availableTools } = useAvailableTools();
+  const { tools: availableTools, isLoading: isToolsLoading } =
+    useAvailableTools();
   const searchTool = availableTools?.find(
     (t) => t.in_code_tool_id === SEARCH_TOOL_ID
   );
@@ -522,6 +567,10 @@ export default function AgentEditorPage({
   const codeInterpreterTool = availableTools?.find(
     (t) => t.in_code_tool_id === PYTHON_TOOL_ID
   );
+  const isImageGenerationAvailable = !!imageGenTool;
+  const imageGenerationDisabledTooltip = isImageGenerationAvailable
+    ? undefined
+    : "Image generation requires a configured model. If you have access, set one up under Settings > Image Generation, or ask an admin.";
 
   // Group MCP server tools from availableTools by server ID
   const mcpServersWithTools = mcpServers.map((server) => {
@@ -554,15 +603,26 @@ export default function AgentEditorPage({
       (_, i) => existingAgent?.starter_messages?.[i]?.message ?? ""
     ),
 
-    // Knowledge - enabled if num_chunks is greater than 0
-    // (num_chunks of 0 or null means knowledge is disabled)
-    enable_knowledge: (existingAgent?.num_chunks ?? 0) > 0,
-    knowledge_source:
-      existingAgent?.user_file_ids && existingAgent.user_file_ids.length > 0
-        ? "user_knowledge"
-        : ("team_knowledge" as "team_knowledge" | "user_knowledge"),
+    // Knowledge - enabled if the agent has the internal search tool attached
+    // or any knowledge sources attached.
+    enable_knowledge:
+      (existingAgent?.tools?.some(
+        (tool) => tool.in_code_tool_id === SEARCH_TOOL_ID
+      ) ??
+        false) ||
+      (existingAgent?.document_sets?.length ?? 0) > 0 ||
+      (existingAgent?.hierarchy_nodes?.length ?? 0) > 0 ||
+      (existingAgent?.attached_documents?.length ?? 0) > 0 ||
+      (existingAgent?.user_file_ids?.length ?? 0) > 0,
     document_set_ids: existingAgent?.document_sets?.map((ds) => ds.id) ?? [],
+    // Individual document IDs from hierarchy browsing
+    document_ids: existingAgent?.attached_documents?.map((doc) => doc.id) ?? [],
+    // Hierarchy node IDs (folders/spaces/channels) for scoped search
+    hierarchy_node_ids:
+      existingAgent?.hierarchy_nodes?.map((node) => node.id) ?? [],
     user_file_ids: existingAgent?.user_file_ids ?? [],
+    // Selected sources for the new knowledge UI - derived from document sets
+    selected_sources: [] as ValidSources[],
 
     // Advanced
     llm_model_provider_override:
@@ -575,31 +635,33 @@ export default function AgentEditorPage({
     replace_base_system_prompt:
       existingAgent?.replace_base_system_prompt ?? false,
     reminders: existingAgent?.task_prompt ?? "",
+    // For new agents, default to false for optional tools to avoid
+    // "Tool not available" errors when the tool isn't configured.
+    // For existing agents, preserve the current tool configuration.
     image_generation:
-      (!!imageGenTool &&
-        existingAgent?.tools?.some(
-          (tool) => tool.in_code_tool_id === IMAGE_GENERATION_TOOL_ID
-        )) ??
-      true,
+      !!imageGenTool &&
+      (existingAgent?.tools?.some(
+        (tool) => tool.in_code_tool_id === IMAGE_GENERATION_TOOL_ID
+      ) ??
+        false),
     web_search:
-      (!!webSearchTool &&
-        existingAgent?.tools?.some(
-          (tool) => tool.in_code_tool_id === WEB_SEARCH_TOOL_ID
-        )) ??
-      true,
+      !!webSearchTool &&
+      (existingAgent?.tools?.some(
+        (tool) => tool.in_code_tool_id === WEB_SEARCH_TOOL_ID
+      ) ??
+        false),
     open_url:
-      (!!openURLTool &&
-        existingAgent?.tools?.some(
-          (tool) => tool.in_code_tool_id === OPEN_URL_TOOL_ID
-        )) ??
-      true,
+      !!openURLTool &&
+      (existingAgent?.tools?.some(
+        (tool) => tool.in_code_tool_id === OPEN_URL_TOOL_ID
+      ) ??
+        false),
     code_interpreter:
-      (!!codeInterpreterTool &&
-        existingAgent?.tools?.some(
-          (tool) => tool.in_code_tool_id === PYTHON_TOOL_ID
-        )) ??
-      true,
-
+      !!codeInterpreterTool &&
+      (existingAgent?.tools?.some(
+        (tool) => tool.in_code_tool_id === PYTHON_TOOL_ID
+      ) ??
+        false),
     // MCP servers - dynamically add fields for each server with nested tool fields
     ...Object.fromEntries(
       mcpServersWithTools.map(({ server, tools }) => {
@@ -635,6 +697,13 @@ export default function AgentEditorPage({
         existingAgent?.tools?.some((t) => t.id === openApiTool.id) ?? false,
       ])
     ),
+
+    // Sharing
+    shared_user_ids: existingAgent?.users?.map((user) => user.id) ?? [],
+    shared_group_ids: existingAgent?.groups ?? [],
+    is_public: existingAgent?.is_public ?? false,
+    label_ids: existingAgent?.labels?.map((l) => l.id) ?? [],
+    is_featured: existingAgent?.is_featured ?? false,
   };
 
   const validationSchema = Yup.object().shape({
@@ -661,27 +730,23 @@ export default function AgentEditorPage({
 
     // Knowledge
     enable_knowledge: Yup.boolean(),
-    knowledge_source: Yup.string().oneOf(["team_knowledge", "user_knowledge"]),
     document_set_ids: Yup.array().of(Yup.number()),
+    document_ids: Yup.array().of(Yup.string()),
+    hierarchy_node_ids: Yup.array().of(Yup.number()),
     user_file_ids: Yup.array().of(Yup.string()),
-    num_chunks: Yup.number()
-      .nullable()
-      .transform((value, originalValue) =>
-        originalValue === "" || originalValue === null ? null : value
-      )
-      .test(
-        "is-non-negative-integer",
-        "The number of chunks must be a non-negative integer (0, 1, 2, etc.)",
-        (value) =>
-          value === null ||
-          value === undefined ||
-          (Number.isInteger(value) && value >= 0)
-      ),
+    selected_sources: Yup.array().of(Yup.string()),
 
     // Advanced
     llm_model_provider_override: Yup.string().nullable().optional(),
     llm_model_version_override: Yup.string().nullable().optional(),
-    knowledge_cutoff_date: Yup.date().nullable().optional(),
+    knowledge_cutoff_date: Yup.date()
+      .nullable()
+      .optional()
+      .test(
+        "knowledge-cutoff-date-not-in-future",
+        "Knowledge cutoff date must be today or earlier.",
+        (value) => !value || !isDateInFuture(value)
+      ),
     replace_base_system_prompt: Yup.boolean(),
     reminders: Yup.string().optional(),
 
@@ -716,15 +781,13 @@ export default function AgentEditorPage({
       const finalStarterMessages =
         starterMessages.length > 0 ? starterMessages : null;
 
-      // Determine knowledge settings
-      const teamKnowledge = values.knowledge_source === "team_knowledge";
-      const numChunks = values.enable_knowledge ? MAX_CHUNKS_FED_TO_CHAT : 0;
-
       // Always look up tools in availableTools to ensure we can find all tools
 
       const toolIds = [];
-      if (values.enable_knowledge && searchTool) {
-        toolIds.push(searchTool.id);
+      if (values.enable_knowledge) {
+        if (vectorDbEnabled && searchTool) {
+          toolIds.push(searchTool.id);
+        }
       }
       if (values.image_generation && imageGenTool) {
         toolIds.push(imageGenTool.id);
@@ -774,32 +837,30 @@ export default function AgentEditorPage({
       const submissionData: PersonaUpsertParameters = {
         name: values.name,
         description: values.description,
-        document_set_ids:
-          values.enable_knowledge && teamKnowledge
-            ? values.document_set_ids
-            : [],
-        num_chunks: numChunks,
-        is_public: existingAgent?.is_public ?? true,
-        // recency_bias: ...,
-        // llm_filter_extraction: ...,
-        llm_relevance_filter: false,
+        document_set_ids: values.enable_knowledge
+          ? values.document_set_ids
+          : [],
+        is_public: values.is_public,
         llm_model_provider_override: values.llm_model_provider_override || null,
         llm_model_version_override: values.llm_model_version_override || null,
         starter_messages: finalStarterMessages,
-        users: undefined, // TODO: Handle restricted access users
-        groups: [], // TODO: Handle groups
+        users: values.shared_user_ids,
+        groups: values.shared_group_ids,
         tool_ids: toolIds,
         // uploaded_image: null, // Already uploaded separately
         remove_image: values.remove_image ?? false,
         uploaded_image_id: values.uploaded_image_id,
         icon_name: values.icon_name,
         search_start_date: values.knowledge_cutoff_date || null,
-        label_ids: null,
-        is_default_persona: false,
+        label_ids: values.label_ids,
+        is_featured: values.is_featured,
         // display_priority: ...,
 
-        user_file_ids:
-          values.enable_knowledge && !teamKnowledge ? values.user_file_ids : [],
+        user_file_ids: values.enable_knowledge ? values.user_file_ids : [],
+        hierarchy_node_ids: values.enable_knowledge
+          ? values.hierarchy_node_ids
+          : [],
+        document_ids: values.enable_knowledge ? values.document_ids : [],
 
         system_prompt: values.instructions,
         replace_base_system_prompt: values.replace_base_system_prompt,
@@ -820,23 +881,19 @@ export default function AgentEditorPage({
         const error = personaResponse
           ? await personaResponse.text()
           : "No response received";
-        setPopup({
-          type: "error",
-          message: `Failed to ${
-            existingAgent ? "update" : "create"
-          } agent - ${error}`,
-        });
+        toast.error(
+          `Failed to ${existingAgent ? "update" : "create"} agent - ${error}`
+        );
         return;
       }
 
       // Success
       const agent = await personaResponse.json();
-      setPopup({
-        type: "success",
-        message: `Agent "${agent.name}" ${
+      toast.success(
+        `Agent "${agent.name}" ${
           existingAgent ? "updated" : "created"
-        } successfully`,
-      });
+        } successfully`
+      );
 
       // Refresh agents list and the specific agent
       await refreshAgents();
@@ -848,18 +905,32 @@ export default function AgentEditorPage({
       appRouter({ agentId: agent.id });
     } catch (error) {
       console.error("Submit error:", error);
-      setPopup({
-        type: "error",
-        message: `An error occurred: ${error}`,
-      });
+      toast.error(`An error occurred: ${error}`);
     }
   }
 
-  // FilePickerPopover callbacks - defined outside render to avoid inline functions
+  // Delete agent handler
+  async function handleDeleteAgent() {
+    if (!existingAgent) return;
+
+    const error = await deleteAgent(existingAgent.id);
+
+    if (error) {
+      toast.error(`Failed to delete agent: ${error}`);
+    } else {
+      toast.success("Agent deleted successfully");
+
+      deleteAgentModal.toggle(false);
+      await refreshAgents();
+      router.push("/app/agents");
+    }
+  }
+
+  // FilePickerPopover callbacks for Knowledge section
   function handlePickRecentFile(
     file: ProjectFile,
     currentFileIds: string[],
-    setFieldValue: (field: string, value: any) => void
+    setFieldValue: (field: string, value: unknown) => void
   ) {
     if (!currentFileIds.includes(file.id)) {
       setFieldValue("user_file_ids", [...currentFileIds, file.id]);
@@ -869,7 +940,7 @@ export default function AgentEditorPage({
   function handleUnpickRecentFile(
     file: ProjectFile,
     currentFileIds: string[],
-    setFieldValue: (field: string, value: any) => void
+    setFieldValue: (field: string, value: unknown) => void
   ) {
     setFieldValue(
       "user_file_ids",
@@ -887,7 +958,7 @@ export default function AgentEditorPage({
   async function handleUploadChange(
     e: React.ChangeEvent<HTMLInputElement>,
     currentFileIds: string[],
-    setFieldValue: (field: string, value: any) => void
+    setFieldValue: (field: string, value: unknown) => void
   ) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -896,7 +967,6 @@ export default function AgentEditorPage({
       const optimistic = await beginUpload(
         Array.from(files),
         null,
-        setPopup,
         (result) => {
           const uploadedFiles = result.user_files || [];
           if (uploadedFiles.length === 0) return;
@@ -922,10 +992,16 @@ export default function AgentEditorPage({
     }
   }
 
+  // Wait for async tool data before rendering the form. Formik captures
+  // initialValues on mount — if tools haven't loaded yet, the initial values
+  // won't include MCP tool fields. Later, toggling those fields would make
+  // the form permanently dirty since they have no baseline to compare against.
+  if (isToolsLoading || isMcpLoading || isOpenApiLoading) {
+    return null;
+  }
+
   return (
     <>
-      {popup}
-
       <div
         data-testid="AgentsEditorPage/container"
         aria-label="Agents Editor Page"
@@ -938,12 +1014,44 @@ export default function AgentEditorPage({
           validateOnChange
           validateOnBlur
           validateOnMount
+          initialTouched={{
+            description:
+              initialValues.description.length >
+              MAX_CHARACTERS_AGENT_DESCRIPTION,
+            starter_messages: initialValues.starter_messages.map(
+              (msg) => msg.length > MAX_CHARACTERS_STARTER_MESSAGE
+            ) as unknown as boolean,
+          }}
           initialStatus={{ warnings: {} }}
         >
           {({ isSubmitting, isValid, dirty, values, setFieldValue }) => {
+            const fileStatusMap = new Map(
+              allRecentFiles.map((f) => [f.id, f.status])
+            );
+
+            const hasUploadingFiles = values.user_file_ids.some(
+              (fileId: string) => {
+                const status = fileStatusMap.get(fileId);
+                if (status === undefined) {
+                  return fileId.startsWith("temp_");
+                }
+                return status === UserFileStatus.UPLOADING;
+              }
+            );
+
+            const hasProcessingFiles = values.user_file_ids.some(
+              (fileId: string) =>
+                fileStatusMap.get(fileId) === UserFileStatus.PROCESSING
+            );
+            const isShared =
+              values.is_public ||
+              values.shared_user_ids.length > 0 ||
+              values.shared_group_ids.length > 0;
+
             return (
               <>
                 <FormWarningsEffect />
+
                 <userFilesModal.Provider>
                   <UserFilesModal
                     title="User Files"
@@ -992,6 +1100,145 @@ export default function AgentEditorPage({
                   />
                 </userFilesModal.Provider>
 
+                <shareAgentModal.Provider>
+                  <ShareAgentModal
+                    agentId={existingAgent?.id}
+                    userIds={values.shared_user_ids}
+                    groupIds={values.shared_group_ids}
+                    isPublic={values.is_public}
+                    isFeatured={values.is_featured}
+                    labelIds={values.label_ids}
+                    onShare={async (
+                      userIds,
+                      groupIds,
+                      isPublic,
+                      isFeatured,
+                      labelIds
+                    ) => {
+                      if (!existingAgent) {
+                        // New agents are not persisted until the main Create action.
+                        setFieldValue("shared_user_ids", userIds);
+                        setFieldValue("shared_group_ids", groupIds);
+                        setFieldValue("is_public", isPublic);
+                        setFieldValue("is_featured", isFeatured);
+                        setFieldValue("label_ids", labelIds);
+                        shareAgentModal.toggle(false);
+                        return;
+                      }
+
+                      const applySharingFields = () => {
+                        setFieldValue("shared_user_ids", userIds);
+                        setFieldValue("shared_group_ids", groupIds);
+                        setFieldValue("is_public", isPublic);
+                        setFieldValue("label_ids", labelIds);
+                      };
+
+                      const refreshSharedUi = async () => {
+                        try {
+                          await refreshAgents();
+                          refreshAgent?.();
+                        } catch (error) {
+                          console.error(
+                            "Refresh failed after successful share:",
+                            error
+                          );
+                          toast.error(
+                            "Agent sharing was saved, but failed to refresh. Please reload."
+                          );
+                        }
+                      };
+
+                      let shareError: string | null;
+                      try {
+                        shareError = await updateAgentSharedStatus(
+                          existingAgent.id,
+                          userIds,
+                          groupIds,
+                          isPublic,
+                          isPaidEnterpriseFeaturesEnabled,
+                          labelIds
+                        );
+                      } catch (error) {
+                        console.error(
+                          "Share agent mutation failed unexpectedly:",
+                          error
+                        );
+                        toast.error("Failed to share agent. Please try again.");
+                        return;
+                      }
+
+                      if (shareError) {
+                        toast.error(`Failed to share agent: ${shareError}`);
+                        return;
+                      }
+
+                      if (canUpdateFeaturedStatus) {
+                        let featuredError: string | null;
+                        try {
+                          featuredError = await updateAgentFeaturedStatus(
+                            existingAgent.id,
+                            isFeatured
+                          );
+                        } catch (error) {
+                          console.error(
+                            "Featured mutation failed unexpectedly:",
+                            error
+                          );
+                          // Share succeeded; sync form and UI before returning.
+                          applySharingFields();
+                          await refreshSharedUi();
+                          toast.error(
+                            "Failed to update featured status. Please try again."
+                          );
+                          return;
+                        }
+
+                        if (featuredError) {
+                          // Share succeeded, featured failed: keep modal open for retry.
+                          applySharingFields();
+                          await refreshSharedUi();
+                          toast.error(
+                            `Failed to update featured status: ${featuredError}`
+                          );
+                          return;
+                        }
+
+                        applySharingFields();
+                        setFieldValue("is_featured", isFeatured);
+                        shareAgentModal.toggle(false);
+                        await refreshSharedUi();
+                        return;
+                      }
+
+                      applySharingFields();
+                      shareAgentModal.toggle(false);
+                      await refreshSharedUi();
+                    }}
+                  />
+                </shareAgentModal.Provider>
+                <deleteAgentModal.Provider>
+                  {deleteAgentModal.isOpen && (
+                    <ConfirmationModalLayout
+                      icon={SvgTrash}
+                      title="Delete Agent"
+                      submit={
+                        <Button variant="danger" onClick={handleDeleteAgent}>
+                          Delete Agent
+                        </Button>
+                      }
+                      onClose={() => deleteAgentModal.toggle(false)}
+                    >
+                      <GeneralLayouts.Section alignItems="start" gap={0.5}>
+                        <Text>
+                          Anyone using this agent will no longer be able to
+                          access it. Deletion cannot be undone.
+                        </Text>
+                        <Text>Are you sure you want to delete this agent?</Text>
+                      </GeneralLayouts.Section>
+                    </ConfirmationModalLayout>
+                  )}
+                </deleteAgentModal.Provider>
+
                 <Form className="h-full w-full">
                   <SettingsLayouts.Root>
                     <SettingsLayouts.Header
@@ -1000,396 +1247,411 @@ export default function AgentEditorPage({
                       rightChildren={
                         <div className="flex gap-2">
                           <Button
+                            prominence="secondary"
                             type="button"
-                            secondary
                             onClick={() => router.back()}
                           >
                             Cancel
                           </Button>
-                          <Button
-                            type="submit"
-                            disabled={isSubmitting || !isValid || !dirty}
+                          <Tooltip
+                            tooltip={
+                              isSubmitting
+                                ? "Saving changes..."
+                                : !isValid
+                                  ? "Please fix the errors in the form before saving."
+                                  : !dirty
+                                    ? "No changes have been made."
+                                    : hasUploadingFiles
+                                      ? "Please wait for files to finish uploading."
+                                      : undefined
+                            }
+                            side="bottom"
                           >
-                            {existingAgent ? "Save" : "Create"}
-                          </Button>
+                            <Button
+                              disabled={
+                                isSubmitting ||
+                                !isValid ||
+                                !dirty ||
+                                hasUploadingFiles
+                              }
+                              type="submit"
+                            >
+                              {existingAgent ? "Save" : "Create"}
+                            </Button>
+                          </Tooltip>
                         </div>
                       }
                       backButton
-                      separator
+                      divider
                     />
 
                     {/* Agent Form Content */}
                     <SettingsLayouts.Body>
-                      <div className="flex flex-row gap-10 justify-between items-start w-full">
-                        <Section>
-                          <InputLayouts.Vertical name="name" label="Name">
+                      <GeneralLayouts.Section
+                        flexDirection="row"
+                        gap={2.5}
+                        alignItems="start"
+                      >
+                        <GeneralLayouts.Section>
+                          <InputVertical withLabel="name" title="Name">
                             <InputTypeInField
                               name="name"
                               placeholder="Name your agent"
                             />
-                          </InputLayouts.Vertical>
+                          </InputVertical>
 
-                          <InputLayouts.Vertical
-                            name="description"
-                            label="Description"
-                            optional
+                          <InputVertical
+                            withLabel="description"
+                            title="Description"
+                            suffix="optional"
                           >
                             <InputTextAreaField
                               name="description"
                               placeholder="What does this agent do?"
                             />
-                          </InputLayouts.Vertical>
-                        </Section>
+                          </InputVertical>
+                        </GeneralLayouts.Section>
 
-                        <Section className="w-fit">
-                          <InputLayouts.Vertical
-                            name="agent_avatar"
-                            label="Agent Avatar"
-                            className="items-center"
+                        <GeneralLayouts.Section width="fit">
+                          <InputVertical
+                            withLabel="agent_avatar"
+                            title="Agent Avatar"
                           >
                             <AgentIconEditor existingAgent={existingAgent} />
-                          </InputLayouts.Vertical>
-                        </Section>
-                      </div>
+                          </InputVertical>
+                        </GeneralLayouts.Section>
+                      </GeneralLayouts.Section>
 
-                      <Separator noPadding />
+                      <Divider
+                        paddingParallel="fit"
+                        paddingPerpendicular="fit"
+                      />
 
-                      <Section>
-                        <InputLayouts.Vertical
-                          name="instructions"
-                          label="Instructions"
-                          optional
+                      <GeneralLayouts.Section>
+                        <InputVertical
+                          withLabel="instructions"
+                          title="Instructions"
+                          suffix="optional"
                           description="Add instructions to tailor the response for this agent."
                         >
                           <InputTextAreaField
                             name="instructions"
                             placeholder="Think step by step and show reasoning for complex problems. Use specific examples. Emphasize action items, and leave blanks for the human to fill in when you have unknown. Use a polite enthusiastic tone."
                           />
-                        </InputLayouts.Vertical>
+                        </InputVertical>
 
-                        <InputLayouts.Vertical
-                          name="starter_messages"
-                          label="Conversation Starters"
+                        <InputVertical
+                          withLabel="starter_messages"
+                          title="Conversation Starters"
                           description="Example messages that help users understand what this agent can do and how to interact with it effectively."
-                          optional
+                          suffix="optional"
                         >
                           <StarterMessages />
-                        </InputLayouts.Vertical>
-                      </Section>
+                        </InputVertical>
+                      </GeneralLayouts.Section>
 
-                      <Separator noPadding />
+                      <Divider
+                        paddingParallel="fit"
+                        paddingPerpendicular="fit"
+                      />
 
-                      <Section>
-                        <div className="flex flex-col gap-4">
-                          <InputLayouts.Label
-                            name="knowledge"
-                            label="Knowledge"
-                            description="Add specific connectors and documents for this agent to use to inform its responses."
-                          />
+                      <AgentKnowledgePane
+                        enableKnowledge={values.enable_knowledge}
+                        onEnableKnowledgeChange={(enabled) =>
+                          setFieldValue("enable_knowledge", enabled)
+                        }
+                        selectedSources={values.selected_sources}
+                        onSourcesChange={(sources) =>
+                          setFieldValue("selected_sources", sources)
+                        }
+                        documentSets={documentSets ?? []}
+                        selectedDocumentSetIds={values.document_set_ids}
+                        onDocumentSetIdsChange={(ids) =>
+                          setFieldValue("document_set_ids", ids)
+                        }
+                        selectedDocumentIds={values.document_ids}
+                        onDocumentIdsChange={(ids) =>
+                          setFieldValue("document_ids", ids)
+                        }
+                        selectedFolderIds={values.hierarchy_node_ids}
+                        onFolderIdsChange={(ids) =>
+                          setFieldValue("hierarchy_node_ids", ids)
+                        }
+                        selectedFileIds={values.user_file_ids}
+                        onFileIdsChange={(ids) =>
+                          setFieldValue("user_file_ids", ids)
+                        }
+                        allRecentFiles={allRecentFiles}
+                        onFileClick={handleFileClick}
+                        onUploadChange={(e) =>
+                          handleUploadChange(
+                            e,
+                            values.user_file_ids,
+                            setFieldValue
+                          )
+                        }
+                        hasProcessingFiles={hasProcessingFiles}
+                        initialAttachedDocuments={
+                          existingAgent?.attached_documents
+                        }
+                        initialHierarchyNodes={existingAgent?.hierarchy_nodes}
+                        vectorDbEnabled={vectorDbEnabled}
+                      />
 
-                          <Card>
-                            <InputLayouts.Horizontal
-                              name="enable_knowledge"
-                              label="Enable Knowledge"
+                      <Divider
+                        paddingParallel="fit"
+                        paddingPerpendicular="fit"
+                      />
+
+                      <SimpleCollapsible>
+                        <SimpleCollapsible.Header
+                          title="Actions"
+                          description="Tools and capabilities available for this agent to use."
+                        />
+                        <SimpleCollapsible.Content>
+                          <GeneralLayouts.Section gap={0.5}>
+                            <Disabled
+                              disabled={!isImageGenerationAvailable}
+                              tooltip={imageGenerationDisabledTooltip}
                             >
-                              <SwitchField name="enable_knowledge" />
-                            </InputLayouts.Horizontal>
-
-                            {values.enable_knowledge && (
-                              <InputLayouts.Horizontal
-                                name="knowledge_source"
-                                label="Knowledge Source"
-                                description="Choose the sources of truth this agent refers to."
-                              >
-                                <InputSelectField
-                                  name="knowledge_source"
-                                  className="w-full"
+                              <Card border="solid" rounding="lg">
+                                <InputHorizontal
+                                  withLabel="image_generation"
+                                  title="Image Generation"
+                                  description="Generate and manipulate images using AI-powered tools."
+                                  disabled={!isImageGenerationAvailable}
                                 >
-                                  <InputSelect.Trigger />
-                                  <InputSelect.Content>
-                                    <InputSelect.Item value="team_knowledge">
-                                      Team Knowledge
-                                    </InputSelect.Item>
-                                    <InputSelect.Item value="user_knowledge">
-                                      User Knowledge
-                                    </InputSelect.Item>
-                                  </InputSelect.Content>
-                                </InputSelectField>
-                              </InputLayouts.Horizontal>
-                            )}
+                                  <SwitchField
+                                    name="image_generation"
+                                    disabled={!isImageGenerationAvailable}
+                                  />
+                                </InputHorizontal>
+                              </Card>
+                            </Disabled>
 
-                            {values.enable_knowledge &&
-                              values.knowledge_source === "team_knowledge" &&
-                              ((documentSets?.length ?? 0) > 0 ? (
-                                <div className="flex gap-2 flex-wrap">
-                                  {documentSets!.map((documentSet) => (
-                                    <DocumentSetSelectable
-                                      key={documentSet.id}
-                                      documentSet={documentSet}
-                                      isSelected={values.document_set_ids.includes(
-                                        documentSet.id
-                                      )}
-                                      onSelect={() => {
-                                        const index =
-                                          values.document_set_ids.indexOf(
-                                            documentSet.id
-                                          );
-                                        if (index !== -1) {
-                                          const newIds = [
-                                            ...values.document_set_ids,
-                                          ];
-                                          newIds.splice(index, 1);
-                                          setFieldValue(
-                                            "document_set_ids",
-                                            newIds
-                                          );
-                                        } else {
-                                          setFieldValue("document_set_ids", [
-                                            ...values.document_set_ids,
-                                            documentSet.id,
-                                          ]);
-                                        }
-                                      }}
+                            <Disabled disabled={!webSearchTool}>
+                              <Card border="solid" rounding="lg">
+                                <InputHorizontal
+                                  withLabel="web_search"
+                                  title="Web Search"
+                                  description="Search the web for real-time information and up-to-date results."
+                                  disabled={!webSearchTool}
+                                >
+                                  <SwitchField
+                                    name="web_search"
+                                    disabled={!webSearchTool}
+                                  />
+                                </InputHorizontal>
+                              </Card>
+                            </Disabled>
+
+                            <Disabled disabled={!openURLTool}>
+                              <Card border="solid" rounding="lg">
+                                <InputHorizontal
+                                  withLabel="open_url"
+                                  title="Open URL"
+                                  description="Fetch and read content from web URLs."
+                                  disabled={!openURLTool}
+                                >
+                                  <SwitchField
+                                    name="open_url"
+                                    disabled={!openURLTool}
+                                  />
+                                </InputHorizontal>
+                              </Card>
+                            </Disabled>
+
+                            <Disabled disabled={!codeInterpreterTool}>
+                              <Card border="solid" rounding="lg">
+                                <InputHorizontal
+                                  withLabel="code_interpreter"
+                                  title="Code Interpreter"
+                                  description="Generate and run code."
+                                  disabled={!codeInterpreterTool}
+                                >
+                                  <SwitchField
+                                    name="code_interpreter"
+                                    disabled={!codeInterpreterTool}
+                                  />
+                                </InputHorizontal>
+                              </Card>
+                            </Disabled>
+
+                            {/* Tools */}
+                            <>
+                              {/* render the divider if there is at least one mcp-server or open-api-tool */}
+                              {(mcpServers.length > 0 ||
+                                openApiTools.length > 0) && (
+                                <Divider
+                                  paddingPerpendicular="xs"
+                                  paddingParallel="fit"
+                                />
+                              )}
+
+                              {/* MCP tools */}
+                              {mcpServersWithTools.length > 0 && (
+                                <GeneralLayouts.Section gap={0.5}>
+                                  {mcpServersWithTools.map(
+                                    ({ server, tools, isLoading }) => (
+                                      <MCPServerCard
+                                        key={server.id}
+                                        server={server}
+                                        tools={tools}
+                                        isLoading={isLoading}
+                                      />
+                                    )
+                                  )}
+                                </GeneralLayouts.Section>
+                              )}
+
+                              {/* OpenAPI tools */}
+                              {openApiTools.length > 0 && (
+                                <GeneralLayouts.Section gap={0.5}>
+                                  {openApiTools.map((tool) => (
+                                    <OpenApiToolCard
+                                      key={tool.id}
+                                      tool={tool}
                                     />
                                   ))}
-                                </div>
-                              ) : (
-                                <CreateButton href="/admin/documents/sets/new">
-                                  Create a Document Set
-                                </CreateButton>
-                              ))}
+                                </GeneralLayouts.Section>
+                              )}
+                            </>
+                          </GeneralLayouts.Section>
+                        </SimpleCollapsible.Content>
+                      </SimpleCollapsible>
 
-                            {values.enable_knowledge &&
-                              values.knowledge_source === "user_knowledge" && (
-                                <div className="flex flex-col gap-2">
-                                  <FilePickerPopover
-                                    trigger={(open) => (
-                                      <CreateButton transient={open}>
-                                        Add User Files
-                                      </CreateButton>
+                      <Divider
+                        paddingParallel="fit"
+                        paddingPerpendicular="fit"
+                      />
+
+                      <SimpleCollapsible>
+                        <SimpleCollapsible.Header
+                          title="Advanced Options"
+                          description="Fine-tune agent prompts and knowledge."
+                        />
+                        <SimpleCollapsible.Content>
+                          <GeneralLayouts.Section>
+                            <Card border="solid" rounding="lg">
+                              <GeneralLayouts.Section>
+                                <InputHorizontal
+                                  title="Share This Agent"
+                                  description="with other users, groups, or everyone in your organization."
+                                  center
+                                >
+                                  <Button
+                                    prominence="secondary"
+                                    icon={isShared ? SvgUsers : SvgLock}
+                                    onClick={() => shareAgentModal.toggle(true)}
+                                  >
+                                    Share
+                                  </Button>
+                                </InputHorizontal>
+                                {canUpdateFeaturedStatus && (
+                                  <>
+                                    <InputHorizontal
+                                      withLabel="is_featured"
+                                      title="Feature This Agent"
+                                      description="Show this agent at the top of the explore agents list and automatically pin it to the sidebar for new users with access."
+                                    >
+                                      <SwitchField name="is_featured" />
+                                    </InputHorizontal>
+                                    {values.is_featured && !isShared && (
+                                      <MessageCard title="This agent is private to you and will only be featured for yourself." />
                                     )}
-                                    selectedFileIds={values.user_file_ids}
-                                    onPickRecent={(file) =>
-                                      handlePickRecentFile(
-                                        file,
-                                        values.user_file_ids,
-                                        setFieldValue
-                                      )
-                                    }
-                                    onUnpickRecent={(file) =>
-                                      handleUnpickRecentFile(
-                                        file,
-                                        values.user_file_ids,
-                                        setFieldValue
-                                      )
-                                    }
-                                    onFileClick={handleFileClick}
-                                    handleUploadChange={(e) =>
-                                      handleUploadChange(
-                                        e,
-                                        values.user_file_ids,
-                                        setFieldValue
-                                      )
+                                  </>
+                                )}
+                              </GeneralLayouts.Section>
+                            </Card>
+
+                            <Card border="solid" rounding="lg">
+                              <GeneralLayouts.Section>
+                                <InputHorizontal
+                                  withLabel="llm_model"
+                                  title="Default Model"
+                                  description="This model will be used by Onyx by default in your chats."
+                                >
+                                  <LLMSelector
+                                    name="llm_model"
+                                    llmProviders={llmProviders ?? []}
+                                    currentLlm={getCurrentLlm(
+                                      values,
+                                      llmProviders
+                                    )}
+                                    onSelect={(selected) =>
+                                      onLlmSelect(selected, setFieldValue)
                                     }
                                   />
+                                </InputHorizontal>
+                                <InputHorizontal
+                                  withLabel="knowledge_cutoff_date"
+                                  title="Knowledge Cutoff Date"
+                                  suffix="optional"
+                                  description="Documents with a last-updated date prior to this will be ignored."
+                                >
+                                  <InputDatePickerField
+                                    name="knowledge_cutoff_date"
+                                    maxDate={new Date()}
+                                  />
+                                </InputHorizontal>
+                                <InputHorizontal
+                                  withLabel="replace_base_system_prompt"
+                                  title="Overwrite System Prompt"
+                                  suffix="(Not Recommended)"
+                                  description='Remove the base system prompt which includes useful instructions (e.g. "You can use Markdown tables"). This may affect response quality.'
+                                >
+                                  <SwitchField name="replace_base_system_prompt" />
+                                </InputHorizontal>
+                              </GeneralLayouts.Section>
+                            </Card>
 
-                                  {values.user_file_ids.length > 0 && (
-                                    <div className="flex flex-wrap gap-2">
-                                      {values.user_file_ids.map((fileId) => {
-                                        const file = allRecentFiles.find(
-                                          (f) => f.id === fileId
-                                        );
-                                        if (!file) return null;
-
-                                        return (
-                                          <FileCard
-                                            key={fileId}
-                                            file={file}
-                                            removeFile={(id: string) => {
-                                              setFieldValue(
-                                                "user_file_ids",
-                                                values.user_file_ids.filter(
-                                                  (fid) => fid !== id
-                                                )
-                                              );
-                                            }}
-                                            onFileClick={(f: ProjectFile) => {
-                                              setPresentingDocument({
-                                                document_id: `project_file__${f.file_id}`,
-                                                semantic_identifier: f.name,
-                                              });
-                                            }}
-                                          />
-                                        );
-                                      })}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                          </Card>
-                        </div>
-                      </Section>
-
-                      <Separator noPadding />
-
-                      <SimpleCollapsible
-                        trigger={
-                          <SimpleCollapsible.Header
-                            title="Actions"
-                            description="Tools and capabilities available for this agent to use."
-                          />
-                        }
-                      >
-                        <Section className="gap-2">
-                          <Card>
-                            <InputLayouts.Horizontal
-                              name="image_generation"
-                              label="Image Generation"
-                              description="Generate and manipulate images using AI-powered tools."
-                            >
-                              <SwitchField
-                                name="image_generation"
-                                disabled={!imageGenTool}
-                              />
-                            </InputLayouts.Horizontal>
-                          </Card>
-
-                          <Card>
-                            <InputLayouts.Horizontal
-                              name="web_search"
-                              label="Web Search"
-                              description="Search the web for real-time information and up-to-date results."
-                            >
-                              <SwitchField
-                                name="web_search"
-                                disabled={!webSearchTool}
-                              />
-                            </InputLayouts.Horizontal>
-                          </Card>
-
-                          <Card>
-                            <InputLayouts.Horizontal
-                              name="open_url"
-                              label="Open URL"
-                              description="Fetch and read content from web URLs."
-                            >
-                              <SwitchField
-                                name="open_url"
-                                disabled={!openURLTool}
-                              />
-                            </InputLayouts.Horizontal>
-                          </Card>
-
-                          <Card>
-                            <InputLayouts.Horizontal
-                              name="code_interpreter"
-                              label="Code Interpreter"
-                              description="Generate and run code."
-                            >
-                              <SwitchField
-                                name="code_interpreter"
-                                disabled={!codeInterpreterTool}
-                              />
-                            </InputLayouts.Horizontal>
-                          </Card>
-
-                          {/* Tools */}
-                          <>
-                            {/* render the separator if there is at least one mcp-server or open-api-tool */}
-                            {(mcpServers.length > 0 ||
-                              openApiTools.length > 0) && (
-                              <Separator noPadding className="py-1" />
-                            )}
-
-                            {/* MCP tools */}
-                            {mcpServersWithTools.length > 0 && (
-                              <div className="flex flex-col gap-2">
-                                {mcpServersWithTools.map(
-                                  ({ server, tools, isLoading }) => (
-                                    <MCPServerCard
-                                      key={server.id}
-                                      server={server}
-                                      tools={tools}
-                                      isLoading={isLoading}
-                                    />
-                                  )
-                                )}
-                              </div>
-                            )}
-
-                            {/* OpenAPI tools */}
-                            {openApiTools.length > 0 && (
-                              <div className="flex flex-col gap-2">
-                                {openApiTools.map((tool) => (
-                                  <OpenApiToolCard key={tool.id} tool={tool} />
-                                ))}
-                              </div>
-                            )}
-                          </>
-                        </Section>
+                            <GeneralLayouts.Section gap={0.25}>
+                              <InputVertical
+                                withLabel="reminders"
+                                title="Reminders"
+                                suffix="optional"
+                              >
+                                <InputTextAreaField
+                                  name="reminders"
+                                  placeholder="Remember, I want you to always format your response as a numbered list."
+                                />
+                              </InputVertical>
+                              <Text text03 secondaryBody>
+                                Append a brief reminder to the prompt messages.
+                                Use this to remind the agent if you find that it
+                                tends to forget certain instructions as the chat
+                                progresses. This should be brief and not
+                                interfere with the user messages.
+                              </Text>
+                            </GeneralLayouts.Section>
+                          </GeneralLayouts.Section>
+                        </SimpleCollapsible.Content>
                       </SimpleCollapsible>
 
-                      <Separator noPadding />
-
-                      <SimpleCollapsible
-                        trigger={
-                          <SimpleCollapsible.Header
-                            title="Advanced Options"
-                            description="Fine-tune agent prompts and knowledge."
+                      {existingAgent && (
+                        <>
+                          <Divider
+                            paddingParallel="fit"
+                            paddingPerpendicular="fit"
                           />
-                        }
-                      >
-                        <Section>
-                          <Card>
-                            <InputLayouts.Horizontal
-                              name="llm_model"
-                              label="Default Model"
-                              description="Select the LLM model to use for this agent. If not set, the user's default model will be used."
-                            >
-                              <LLMSelector
-                                llmProviders={llmProviders ?? []}
-                                currentLlm={getCurrentLlm(values, llmProviders)}
-                                onSelect={(selected) =>
-                                  onLlmSelect(selected, setFieldValue)
-                                }
-                              />
-                            </InputLayouts.Horizontal>
-                            <InputLayouts.Horizontal
-                              name="knowledge_cutoff_date"
-                              label="Knowledge Cutoff Date"
-                              description="Set the knowledge cutoff date for this agent. The agent will only use information up to this date."
-                            >
-                              <InputDatePickerField name="knowledge_cutoff_date" />
-                            </InputLayouts.Horizontal>
-                            <InputLayouts.Horizontal
-                              name="replace_base_system_prompt"
-                              label="Overwrite System Prompt"
-                              description='Completely replace the base system prompt. This might affect response quality since it will also overwrite useful system instructions (e.g. "You (the LLM) can provide markdown and it will be rendered").'
-                            >
-                              <SwitchField name="replace_base_system_prompt" />
-                            </InputLayouts.Horizontal>
-                          </Card>
 
-                          <div className="flex flex-col gap-1">
-                            <InputLayouts.Vertical
-                              name="reminders"
-                              label="Reminders"
+                          <Card border="solid" rounding="lg">
+                            <InputHorizontal
+                              title="Delete This Agent"
+                              description="Anyone using this agent will no longer be able to access it."
+                              center
                             >
-                              <InputTextAreaField
-                                name="reminders"
-                                placeholder="Remember, I want you to always format your response as a numbered list."
-                              />
-                            </InputLayouts.Vertical>
-                            <Text text03 secondaryBody>
-                              Append a brief reminder to the prompt messages.
-                              Use this to remind the agent if you find that it
-                              tends to forget certain instructions as the chat
-                              progresses. This should be brief and not interfere
-                              with the user messages.
-                            </Text>
-                          </div>
-                        </Section>
-                      </SimpleCollapsible>
+                              <Button
+                                variant="danger"
+                                prominence="secondary"
+                                onClick={() => deleteAgentModal.toggle(true)}
+                              >
+                                Delete Agent
+                              </Button>
+                            </InputHorizontal>
+                          </Card>
+                        </>
+                      )}
                     </SettingsLayouts.Body>
                   </SettingsLayouts.Root>
                 </Form>

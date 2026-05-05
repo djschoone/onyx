@@ -1,8 +1,7 @@
 "use client";
 
 import { JSX } from "react";
-import { HealthCheckBanner } from "../health/healthcheck";
-import Separator from "@/refresh-components/Separator";
+import { Divider } from "@opal/components";
 import type { IconProps } from "@opal/types";
 import Text from "@/refresh-components/texts/Text";
 
@@ -21,9 +20,6 @@ export function AdminPageTitle({
 }: AdminPageTitleProps) {
   return (
     <div className="w-full">
-      <div className="mb-4">
-        <HealthCheckBanner />
-      </div>
       <div className="w-full flex flex-row justify-between">
         <div className="flex flex-row gap-2">
           {typeof Icon === "function" ? (
@@ -37,7 +33,7 @@ export function AdminPageTitle({
         </div>
         {farRightElement}
       </div>
-      {includeDivider ? <Separator /> : <div className="mb-6" />}
+      {includeDivider ? <Divider /> : <div className="mb-6" />}
     </div>
   );
 }

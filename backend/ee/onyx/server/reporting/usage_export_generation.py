@@ -57,6 +57,7 @@ def generate_chat_messages_report(
                 "assistant_name",
                 "user_email",
                 "number_of_tokens",
+                "llm_model",
             ]
         )
         for chat_message_skeleton_batch in get_all_empty_chat_message_entries(
@@ -72,6 +73,7 @@ def generate_chat_messages_report(
                         chat_message_skeleton.assistant_name,
                         chat_message_skeleton.user_email,
                         chat_message_skeleton.number_of_tokens,
+                        chat_message_skeleton.llm_model,
                     ]
                 )
 
@@ -152,10 +154,7 @@ def create_new_usage_report(
         zip_buffer.seek(0)
 
         # store zip blob to file_store
-        report_name = (
-            f"{datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')}"
-            f"_{report_id}_usage_report.zip"
-        )
+        report_name = f"{datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')}_{report_id}_usage_report.zip"
         file_store.save_file(
             content=zip_buffer,
             display_name=report_name,

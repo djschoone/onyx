@@ -7,10 +7,7 @@ from onyx.configs.constants import DocumentSource
 from onyx.connectors.credentials_provider import OnyxStaticCredentialsProvider
 from onyx.connectors.imap.connector import ImapConnector
 from tests.daily.connectors.imap.models import EmailDoc
-from tests.daily.connectors.utils import (
-    load_all_docs_from_checkpoint_connector_with_perm_sync,
-)
-from tests.daily.connectors.utils import to_documents
+from tests.daily.connectors.utils import load_all_from_connector
 
 
 @pytest.fixture
@@ -68,15 +65,12 @@ def test_imap_connector(
 ) -> None:
     actual_email_docs = [
         EmailDoc.from_doc(document=document)
-        for document in to_documents(
-            iterator=iter(
-                load_all_docs_from_checkpoint_connector_with_perm_sync(
-                    connector=imap_connector,
-                    start=0,
-                    end=time.time(),
-                )
-            )
-        )
+        for document in load_all_from_connector(
+            connector=imap_connector,
+            start=0,
+            end=time.time(),
+            include_permissions=True,
+        ).documents
     ]
 
     assert actual_email_docs == expected_email_docs

@@ -78,10 +78,6 @@ GEN_AI_MODEL_FALLBACK_MAX_TOKENS = int(
 GEN_AI_SINGLE_USER_MESSAGE_EXPECTED_MAX_TOKENS = 512
 GEN_AI_TEMPERATURE = float(os.environ.get("GEN_AI_TEMPERATURE") or 0)
 
-# Reasoning models use effort to control the amount of reasoning
-# before tool calling or answer generation.
-DEFAULT_REASONING_EFFORT = os.environ.get("DEFAULT_REASONING_EFFORT") or "low"
-
 # should be used if you are using a custom LLM inference provider that doesn't support
 # streaming format AND you are still using the langchain/litellm LLM class
 DISABLE_LITELLM_STREAMING = (
@@ -128,3 +124,17 @@ if _LITELLM_EXTRA_BODY_RAW:
         LITELLM_EXTRA_BODY = json.loads(_LITELLM_EXTRA_BODY_RAW)
     except Exception:
         pass
+
+#####
+# Prompt Caching Configs
+#####
+# Enable prompt caching framework
+ENABLE_PROMPT_CACHING = (
+    os.environ.get("ENABLE_PROMPT_CACHING", "true").lower() != "false"
+)
+
+# Cache TTL multiplier - store caches slightly longer than provider TTL
+# This allows for some clock skew and ensures we don't lose cache metadata prematurely
+PROMPT_CACHE_REDIS_TTL_MULTIPLIER = float(
+    os.environ.get("PROMPT_CACHE_REDIS_TTL_MULTIPLIER") or 1.2
+)

@@ -7,12 +7,8 @@ from github import Github
 
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.utils.logger import setup_logger
-from tests.integration.common_utils.document_acl import (
-    get_all_connector_documents,
-)
-from tests.integration.common_utils.document_acl import (
-    get_user_document_access_via_acl,
-)
+from tests.integration.common_utils.document_acl import get_all_connector_documents
+from tests.integration.common_utils.document_acl import get_user_document_access_via_acl
 from tests.integration.common_utils.managers.cc_pair import CCPairManager
 from tests.integration.connector_job_tests.github.conftest import (
     GitHubTestEnvSetupTuple,
@@ -40,6 +36,8 @@ def test_github_private_repo_permission_sync(
     ) = github_test_env_setup
 
     # Create GitHub client from credential
+    # Note: github_credential is a DATestCredential (Pydantic model), not a SQLAlchemy model
+    # so credential_json is already a plain dict
     github_access_token = github_credential.credential_json["github_access_token"]
     github_client = Github(github_access_token)
     github_manager = GitHubManager(github_client)
@@ -158,6 +156,8 @@ def test_github_public_repo_permission_sync(
     ) = github_test_env_setup
 
     # Create GitHub client from credential
+    # Note: github_credential is a DATestCredential (Pydantic model), not a SQLAlchemy model
+    # so credential_json is already a plain dict
     github_access_token = github_credential.credential_json["github_access_token"]
     github_client = Github(github_access_token)
     github_manager = GitHubManager(github_client)
@@ -262,6 +262,8 @@ def test_github_internal_repo_permission_sync(
     ) = github_test_env_setup
 
     # Create GitHub client from credential
+    # Note: github_credential is a DATestCredential (Pydantic model), not a SQLAlchemy model
+    # so credential_json is already a plain dict
     github_access_token = github_credential.credential_json["github_access_token"]
     github_client = Github(github_access_token)
     github_manager = GitHubManager(github_client)

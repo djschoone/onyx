@@ -10,10 +10,14 @@ from pydantic import BaseModel
 from redis.lock import Lock as RedisLock
 
 from onyx.access.models import DocExternalAccess
+from onyx.access.models import ElementExternalAccess
 from onyx.configs.constants import CELERY_GENERIC_BEAT_LOCK_TIMEOUT
 from onyx.configs.constants import CELERY_PERMISSIONS_SYNC_LOCK_TIMEOUT
 from onyx.configs.constants import OnyxRedisConstants
 from onyx.redis.redis_pool import SCAN_ITER_COUNT_DEFAULT
+from onyx.server.metrics.perm_sync_metrics import (
+    observe_doc_perm_sync_db_update_duration,
+)
 from onyx.utils.variable_functionality import fetch_versioned_implementation
 
 
@@ -168,27 +172,27 @@ class RedisConnectorPermissionSync:
     def update_db(
         self,
         lock: RedisLock | None,
-        new_permissions: list[DocExternalAccess],
+        new_permissions: list[ElementExternalAccess],
         source_string: str,
         connector_id: int,
         credential_id: int,
         task_logger: Logger | None = None,
     ) -> PermissionSyncResult:
-        """Update permissions for documents.
+        """Update permissions for documents and hierarchy nodes.
 
         Returns:
             PermissionSyncResult containing counts of successful updates and errors
         """
         last_lock_time = time.monotonic()
 
-        document_update_permissions_fn = fetch_versioned_implementation(
+        element_update_permissions_fn = fetch_versioned_implementation(
             "onyx.background.celery.tasks.doc_permission_syncing.tasks",
-            "document_update_permissions",
+            "element_update_permissions",
         )
 
         num_permissions = 0
         num_errors = 0
-        # Create a task for each document permission sync
+        cumulative_db_update_time = 0.0
         for permissions in new_permissions:
             current_time = time.monotonic()
             if lock and current_time - last_lock_time >= (
@@ -206,9 +210,14 @@ class RedisConnectorPermissionSync:
                     num_groups = len(
                         permissions.external_access.external_user_group_ids
                     )
+                    element_id = (
+                        permissions.doc_id
+                        if isinstance(permissions, DocExternalAccess)
+                        else permissions.raw_node_id
+                    )
                     task_logger.warning(
                         f"Permissions length exceeded, skipping...: "
-                        f"{permissions.doc_id} "
+                        f"{element_id} "
                         f"{num_users=} {num_groups=} "
                         f"{permissions.external_access.MAX_NUM_ENTRIES=}"
                     )
@@ -221,9 +230,11 @@ class RedisConnectorPermissionSync:
             # a rare enough case to be acceptable.
 
             # This can internally exception due to db issues but still continue
-            # Catch exceptions per-document to avoid breaking the entire sync
+            # Catch exceptions per-element to avoid breaking the entire sync
+            db_start = time.monotonic()
             try:
-                document_update_permissions_fn(
+
+                element_update_permissions_fn(
                     self.tenant_id,
                     permissions,
                     source_string,
@@ -234,11 +245,20 @@ class RedisConnectorPermissionSync:
             except Exception:
                 num_errors += 1
                 if task_logger:
-                    task_logger.exception(
-                        f"Failed to update permissions for document {permissions.doc_id}"
+                    element_id = (
+                        permissions.doc_id
+                        if isinstance(permissions, DocExternalAccess)
+                        else permissions.raw_node_id
                     )
-                # Continue processing other documents
+                    task_logger.exception(
+                        f"Failed to update permissions for element {element_id}"
+                    )
+            finally:
+                cumulative_db_update_time += time.monotonic() - db_start
 
+        observe_doc_perm_sync_db_update_duration(
+            cumulative_db_update_time, source_string
+        )
         return PermissionSyncResult(num_updated=num_permissions, num_errors=num_errors)
 
     def reset(self) -> None:

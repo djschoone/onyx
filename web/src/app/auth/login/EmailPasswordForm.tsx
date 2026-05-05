@@ -1,15 +1,15 @@
 "use client";
 
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import { basicLogin, basicSignup } from "@/lib/user";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { Form, Formik } from "formik";
 import * as Yup from "yup";
 import { requestEmailVerification } from "../lib";
 import { useMemo, useState } from "react";
 import { Spinner } from "@/components/Spinner";
 import Link from "next/link";
-import { useUser } from "@/components/user/UserProvider";
+import { useUser } from "@/providers/UserProvider";
 import { FormikField } from "@/refresh-components/form/FormikField";
 import { FormField } from "@/refresh-components/form/FormField";
 import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
@@ -18,6 +18,7 @@ import { validateInternalRedirect } from "@/lib/auth/redirectValidation";
 import { APIFormFieldState } from "@/refresh-components/form/types";
 import { SvgArrowRightCircle } from "@opal/icons";
 import { useCaptcha } from "@/lib/hooks/useCaptcha";
+import Spacer from "@/refresh-components/Spacer";
 
 interface EmailPasswordFormProps {
   isSignup?: boolean;
@@ -38,7 +39,6 @@ export default function EmailPasswordForm({
 }: EmailPasswordFormProps) {
   const { user, authTypeMetadata } = useUser();
   const passwordMinLength = authTypeMetadata?.passwordMinLength ?? 8;
-  const { popup, setPopup } = usePopup();
   const [isWorking, setIsWorking] = useState<boolean>(false);
   const [apiStatus, setApiStatus] = useState<APIFormFieldState>("loading");
   const [showApiMessage, setShowApiMessage] = useState(false);
@@ -63,7 +63,6 @@ export default function EmailPasswordForm({
   return (
     <>
       {isWorking && <Spinner />}
-      {popup}
 
       <Formik
         initialValues={{
@@ -108,35 +107,35 @@ export default function EmailPasswordForm({
             if (!response.ok) {
               setIsWorking(false);
 
-              const errorDetail: any = (await response.json()).detail;
+              const errorBody: any = await response.json();
+              const errorDetail = errorBody.detail;
               let errorMsg: string = "Unknown error";
-              if (typeof errorDetail === "object" && errorDetail.reason) {
-                errorMsg = errorDetail.reason;
-              } else if (errorDetail === "REGISTER_USER_ALREADY_EXISTS") {
+              if (errorDetail === "REGISTER_USER_ALREADY_EXISTS") {
                 errorMsg =
                   "An account already exists with the specified email.";
+              } else if (typeof errorDetail === "string" && errorDetail) {
+                errorMsg = errorDetail;
               }
               if (response.status === 429) {
                 errorMsg = "Too many requests. Please try again later.";
               }
               setErrorMessage(errorMsg);
               setApiStatus("error");
-              setPopup({
-                type: "error",
-                message: `Failed to sign up - ${errorMsg}`,
-              });
+              toast.error(`Failed to sign up - ${errorMsg}`);
               setIsWorking(false);
               return;
             } else {
               setApiStatus("success");
-              setPopup({
-                type: "success",
-                message: "Account created successfully. Please log in.",
-              });
+              toast.success("Account created successfully. Please log in.");
             }
           }
 
-          const loginResponse = await basicLogin(email, values.password);
+          const loginCaptchaToken = await getCaptchaToken("login");
+          const loginResponse = await basicLogin(
+            email,
+            values.password,
+            loginCaptchaToken
+          );
           if (loginResponse.ok) {
             setApiStatus("success");
             if (isSignup && shouldVerify) {
@@ -153,7 +152,7 @@ export default function EmailPasswordForm({
               const validatedNextUrl = validateInternalRedirect(nextUrl);
               window.location.href = validatedNextUrl
                 ? validatedNextUrl
-                : `/chat${isSignup && !isJoin ? "?new_team=true" : ""}`;
+                : `/app${isSignup && !isJoin ? "?new_team=true" : ""}`;
             }
           } else {
             setIsWorking(false);
@@ -171,10 +170,7 @@ export default function EmailPasswordForm({
             }
             setErrorMessage(errorMsg);
             setApiStatus("error");
-            setPopup({
-              type: "error",
-              message: `Failed to login - ${errorMsg}`,
-            });
+            toast.error(`Failed to login - ${errorMsg}`);
           }
         }}
       >
@@ -200,7 +196,7 @@ export default function EmailPasswordForm({
                         placeholder="email@yourcompany.com"
                         onClear={() => helper.setValue("")}
                         data-testid="email"
-                        error={apiStatus === "error"}
+                        variant={apiStatus === "error" ? "error" : undefined}
                         showClearButton={false}
                       />
                     </FormField.Control>
@@ -224,7 +220,7 @@ export default function EmailPasswordForm({
                           }
                           field.onChange(e);
                         }}
-                        placeholder="**************"
+                        placeholder="∗∗∗∗∗∗∗∗∗∗∗∗∗∗"
                         onClear={() => helper.setValue("")}
                         data-testid="password"
                         error={apiStatus === "error"}
@@ -250,17 +246,18 @@ export default function EmailPasswordForm({
                 )}
               />
 
+              <Spacer rem={0.25} />
               <Button
-                type="submit"
-                className="w-full mt-1"
                 disabled={isSubmitting || !isValid || !dirty}
+                type="submit"
+                width="full"
                 rightIcon={SvgArrowRightCircle}
               >
                 {isJoin ? "Join" : isSignup ? "Create Account" : "Sign In"}
               </Button>
               {user?.is_anonymous_user && (
                 <Link
-                  href="/chat"
+                  href="/app"
                   className="text-xs text-action-link-05 cursor-pointer text-center w-full font-medium mx-auto"
                 >
                   <span className="hover:border-b hover:border-dotted hover:border-action-link-05">

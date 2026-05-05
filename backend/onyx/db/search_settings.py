@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 from onyx.configs.model_configs import DEFAULT_DOCUMENT_ENCODER_MODEL
 from onyx.configs.model_configs import DOCUMENT_ENCODER_MODEL
 from onyx.context.search.models import SavedSearchSettings
-from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.llm import fetch_embedding_provider
 from onyx.db.models import CloudEmbeddingProvider
 from onyx.db.models import IndexAttempt
@@ -18,7 +17,6 @@ from onyx.server.manage.embedding.models import (
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import PRESERVED_SEARCH_FIELDS
 from shared_configs.enums import EmbeddingProvider
-
 
 logger = setup_logger()
 
@@ -54,12 +52,6 @@ def create_search_settings(
         enable_contextual_rag=search_settings.enable_contextual_rag,
         contextual_rag_llm_name=search_settings.contextual_rag_llm_name,
         contextual_rag_llm_provider=search_settings.contextual_rag_llm_provider,
-        multilingual_expansion=search_settings.multilingual_expansion,
-        disable_rerank_for_streaming=search_settings.disable_rerank_for_streaming,
-        rerank_model_name=search_settings.rerank_model_name,
-        rerank_provider_type=search_settings.rerank_provider_type,
-        rerank_api_key=search_settings.rerank_api_key,
-        num_rerank=search_settings.num_rerank,
         switchover_type=search_settings.switchover_type,
     )
 
@@ -135,7 +127,7 @@ def get_current_search_settings(db_session: Session) -> SearchSettings:
     latest_settings = result.scalars().first()
 
     if not latest_settings:
-        raise RuntimeError("No search settings specified, DB is not in a valid state")
+        raise RuntimeError("No search settings specified; DB is not in a valid state.")
     return latest_settings
 
 
@@ -183,23 +175,12 @@ def get_all_search_settings(db_session: Session) -> list[SearchSettings]:
     return list(all_settings)
 
 
-def get_multilingual_expansion(db_session: Session | None = None) -> list[str]:
-    if db_session is None:
-        with get_session_with_current_tenant() as db_session:
-            search_settings = get_current_search_settings(db_session)
-    else:
-        search_settings = get_current_search_settings(db_session)
-    if not search_settings:
-        return []
-    return search_settings.multilingual_expansion
-
-
 def update_search_settings(
     current_settings: SearchSettings,
     updated_settings: SavedSearchSettings,
     preserved_fields: list[str],
 ) -> None:
-    for field, value in updated_settings.dict().items():
+    for field, value in updated_settings.model_dump().items():
         if field not in preserved_fields:
             setattr(current_settings, field, value)
 

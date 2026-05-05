@@ -57,10 +57,8 @@ class WorkerResult(TypedDict):
 
 def _get_all_backend_configs() -> List[BackendConfig]:
     """Get configurations for all available backends"""
-    from onyx.configs.app_configs import (
-        S3_ENDPOINT_URL,
-        AWS_REGION_NAME,
-    )
+    from onyx.configs.app_configs import AWS_REGION_NAME
+    from onyx.configs.app_configs import S3_ENDPOINT_URL
 
     s3_aws_access_key_id = os.environ.get("S3_AWS_ACCESS_KEY_ID_FOR_TEST")
     s3_aws_secret_access_key = os.environ.get("S3_AWS_SECRET_ACCESS_KEY_FOR_TEST")
@@ -109,7 +107,9 @@ def _get_all_backend_configs() -> List[BackendConfig]:
     ids=lambda config: config["backend_name"],
 )
 def file_store(
-    request: pytest.FixtureRequest, db_session: Session, tenant_context: None
+    request: pytest.FixtureRequest,
+    db_session: Session,  # noqa: ARG001
+    tenant_context: None,  # noqa: ARG001
 ) -> Generator[S3BackedFileStore, None, None]:
     """Create an S3BackedFileStore instance for testing with parametrized backend"""
     backend_config: BackendConfig = request.param
@@ -146,7 +146,8 @@ def file_store(
         if "Contents" in response:
             objects_to_delete = [{"Key": obj["Key"]} for obj in response["Contents"]]
             s3_client.delete_objects(
-                Bucket=actual_bucket_name, Delete={"Objects": objects_to_delete}  # type: ignore[typeddict-item]
+                Bucket=actual_bucket_name,
+                Delete={"Objects": objects_to_delete},
             )
             logger.info(
                 f"Cleaned up {len(objects_to_delete)} test objects from {backend_config['backend_name']}"
@@ -940,17 +941,15 @@ class TestS3BackedFileStore:
 
         # Verify all prefixed files are returned
         for expected_file_id in prefixed_files:
-            assert expected_file_id in returned_file_ids, (
-                f"File '{expected_file_id}' should be in results but was not found. "
-                f"Returned files: {returned_file_ids}"
-            )
+            assert (
+                expected_file_id in returned_file_ids
+            ), f"File '{expected_file_id}' should be in results but was not found. Returned files: {returned_file_ids}"
 
         # Verify no non-prefixed files are returned
         for unexpected_file_id in non_prefixed_files:
-            assert unexpected_file_id not in returned_file_ids, (
-                f"File '{unexpected_file_id}' should NOT be in results but was found. "
-                f"Returned files: {returned_file_ids}"
-            )
+            assert (
+                unexpected_file_id not in returned_file_ids
+            ), f"File '{unexpected_file_id}' should NOT be in results but was found. Returned files: {returned_file_ids}"
 
         # Verify the returned records have correct properties
         for record in prefix_results:

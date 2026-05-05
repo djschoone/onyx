@@ -6,10 +6,9 @@ from typing import Optional
 import requests
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.cross_connector_utils.rate_limit_wrapper import (
-    rate_limit_builder,
-)
+from onyx.connectors.cross_connector_utils.rate_limit_wrapper import rate_limit_builder
 from onyx.connectors.interfaces import GenerateDocumentsOutput
 from onyx.connectors.interfaces import LoadConnector
 from onyx.connectors.interfaces import PollConnector
@@ -17,9 +16,9 @@ from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.utils.retry_wrapper import retry_builder
-
 
 CLICKUP_API_BASE_URL = "https://api.clickup.com/api/v2"
 
@@ -55,7 +54,10 @@ class ClickupConnector(LoadConnector, PollConnector):
         headers = {"Authorization": self.api_token}
 
         response = requests.get(
-            f"{CLICKUP_API_BASE_URL}/{endpoint}", headers=headers, params=params
+            f"{CLICKUP_API_BASE_URL}/{endpoint}",
+            headers=headers,
+            params=params,
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
 
         response.raise_for_status()
@@ -67,7 +69,7 @@ class ClickupConnector(LoadConnector, PollConnector):
         response = self._make_request(url_endpoint)
         comments = [
             TextSection(
-                link=f'https://app.clickup.com/t/{task_id}?comment={comment_dict["id"]}',
+                link=f"https://app.clickup.com/t/{task_id}?comment={comment_dict['id']}",
                 text=comment_dict["comment_text"],
             )
             for comment_dict in response["comments"]
@@ -80,7 +82,7 @@ class ClickupConnector(LoadConnector, PollConnector):
         start: int | None = None,
         end: int | None = None,
     ) -> GenerateDocumentsOutput:
-        doc_batch: list[Document] = []
+        doc_batch: list[Document | HierarchyNode] = []
         page: int = 0
         params = {
             "include_markdown_description": "true",
@@ -94,11 +96,13 @@ class ClickupConnector(LoadConnector, PollConnector):
             params["date_updated_lt"] = end
 
         if self.connector_type == "list":
-            params["list_ids[]"] = self.connector_ids
+            params["list_ids[]"] = self.connector_ids  # ty: ignore[invalid-assignment]
         elif self.connector_type == "folder":
-            params["project_ids[]"] = self.connector_ids
+            params["project_ids[]"] = (  # ty: ignore[invalid-assignment]
+                self.connector_ids
+            )
         elif self.connector_type == "space":
-            params["space_ids[]"] = self.connector_ids
+            params["space_ids[]"] = self.connector_ids  # ty: ignore[invalid-assignment]
 
         url_endpoint = f"/team/{self.team_id}/task"
 
@@ -170,7 +174,10 @@ class ClickupConnector(LoadConnector, PollConnector):
                         document.metadata[extra_field] = task[extra_field]
 
                 if self.retrieve_task_comments:
-                    document.sections.extend(self._get_task_comments(task["id"]))
+                    document.sections = [
+                        *document.sections,
+                        *self._get_task_comments(task["id"]),
+                    ]
 
                 doc_batch.append(document)
 

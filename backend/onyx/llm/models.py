@@ -20,6 +20,7 @@ class ReasoningEffort(str, Enum):
     - Gemini: Uses "none", "low", "medium", "high" for thinking_budget (via litellm mapping)
     """
 
+    AUTO = "auto"
     OFF = "off"
     LOW = "low"
     MEDIUM = "medium"
@@ -27,9 +28,28 @@ class ReasoningEffort(str, Enum):
 
 
 # OpenAI reasoning effort mapping
-OPENAI_REASONING_EFFORT: dict[ReasoningEffort | None, str] = {
-    None: "low",
+# Note: OpenAI API does not support "auto" - valid values are: none, minimal, low, medium, high, xhigh
+OPENAI_REASONING_EFFORT: dict[ReasoningEffort, str] = {
+    ReasoningEffort.AUTO: "medium",  # Default to medium when auto is requested
     ReasoningEffort.OFF: "none",
+    ReasoningEffort.LOW: "low",
+    ReasoningEffort.MEDIUM: "medium",
+    ReasoningEffort.HIGH: "high",
+}
+
+# Anthropic reasoning effort to budget tokens mapping
+# Loosely based on budgets from LiteLLM but this ensures it's not updated without our knowing from a version bump.
+ANTHROPIC_REASONING_EFFORT_BUDGET: dict[ReasoningEffort, int] = {
+    ReasoningEffort.AUTO: 2048,
+    ReasoningEffort.LOW: 1024,
+    ReasoningEffort.MEDIUM: 2048,
+    ReasoningEffort.HIGH: 4096,
+}
+
+# Newer Anthropic models (Claude Opus 4.7+) use adaptive thinking with
+# output_config.effort instead of thinking.type.enabled + budget_tokens.
+ANTHROPIC_ADAPTIVE_REASONING_EFFORT: dict[ReasoningEffort, str] = {
+    ReasoningEffort.AUTO: "medium",
     ReasoningEffort.LOW: "low",
     ReasoningEffort.MEDIUM: "medium",
     ReasoningEffort.HIGH: "high",
@@ -41,6 +61,8 @@ OPENAI_REASONING_EFFORT: dict[ReasoningEffort | None, str] = {
 class TextContentPart(BaseModel):
     type: Literal["text"] = "text"
     text: str
+    # Some providers (e.g. Anthropic/Gemini) support prompt caching controls on content blocks.
+    cache_control: dict | None = None
 
 
 class ImageUrlDetail(BaseModel):
@@ -69,23 +91,31 @@ class ToolCall(BaseModel):
 
 
 # Message types
-class SystemMessage(BaseModel):
+
+
+# Base class for all cacheable messages
+class CacheableMessage(BaseModel):
+    # Some providers support prompt caching controls at the message level (passed through via LiteLLM).
+    cache_control: dict | None = None
+
+
+class SystemMessage(CacheableMessage):
     role: Literal["system"] = "system"
     content: str
 
 
-class UserMessage(BaseModel):
+class UserMessage(CacheableMessage):
     role: Literal["user"] = "user"
     content: str | list[ContentPart]
 
 
-class AssistantMessage(BaseModel):
+class AssistantMessage(CacheableMessage):
     role: Literal["assistant"] = "assistant"
     content: str | None = None
     tool_calls: list[ToolCall] | None = None
 
 
-class ToolMessage(BaseModel):
+class ToolMessage(CacheableMessage):
     role: Literal["tool"] = "tool"
     content: str
     tool_call_id: str
@@ -94,4 +124,4 @@ class ToolMessage(BaseModel):
 # Union type for all OpenAI Chat Completions messages
 ChatCompletionMessage = SystemMessage | UserMessage | AssistantMessage | ToolMessage
 # Allows for passing in a string directly. This is provided for convenience and is wrapped as a UserMessage.
-LanguageModelInput = list[ChatCompletionMessage] | str
+LanguageModelInput = list[ChatCompletionMessage] | ChatCompletionMessage

@@ -1,10 +1,12 @@
 import abc
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from onyx.access.models import DocumentAccess
 from onyx.access.models import ExternalAccess
+from onyx.configs.chat_configs import NUM_RETURNED_HITS
 from onyx.configs.chat_configs import TITLE_CONTENT_RATIO
 from onyx.context.search.models import IndexFilters
 from onyx.context.search.models import InferenceChunk
@@ -93,6 +95,12 @@ class DocumentMetadata:
     external_access: ExternalAccess | None = None
     doc_metadata: dict[str, Any] | None = None
 
+    # The resolved database ID of the parent hierarchy node (folder/container)
+    parent_hierarchy_node_id: int | None = None
+
+    # Opt-in pointer to the persisted raw file for this document (file_store id).
+    file_id: str | None = None
+
 
 @dataclass
 class VespaDocumentFields:
@@ -109,10 +117,6 @@ class VespaDocumentFields:
     hidden: bool | None = None
     aggregated_chunk_boost_factor: float | None = None
 
-    # document_id is added for migration purposes, ideally we should not be updating this field
-    # TODO(subash): remove this field in a future migration
-    document_id: str | None = None
-
 
 @dataclass
 class VespaDocumentUserFields:
@@ -121,6 +125,7 @@ class VespaDocumentUserFields:
     """
 
     user_projects: list[int] | None = None
+    personas: list[int] | None = None
 
 
 @dataclass
@@ -205,7 +210,7 @@ class Indexable(abc.ABC):
     @abc.abstractmethod
     def index(
         self,
-        chunks: list[DocMetadataAwareIndexChunk],
+        chunks: Iterable[DocMetadataAwareIndexChunk],
         index_batch_params: IndexBatchParams,
     ) -> set[DocumentInsertionRecord]:
         """
@@ -225,8 +230,8 @@ class Indexable(abc.ABC):
         it is done automatically outside of this code.
 
         Parameters:
-        - chunks: Document chunks with all of the information needed for indexing to the document
-                index.
+        - chunks: Document chunks with all of the information needed for
+                indexing to the document index.
         - tenant_id: The tenant id of the user whose chunks are being indexed
         - large_chunks_enabled: Whether large chunks are enabled
 
@@ -296,20 +301,6 @@ class Updatable(abc.ABC):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    def update(self, update_requests: list[UpdateRequest], *, tenant_id: str) -> None:
-        """
-        Updates some set of chunks. The document and fields to update are specified in the update
-        requests. Each update request in the list applies its changes to a list of document ids.
-        None values mean that the field does not need an update.
-
-        Parameters:
-        - update_requests: for a list of document ids in the update request, apply the same updates
-                to all of the documents with those ids. This is for bulk handling efficiency. Many
-                updates are done at the connector level which have many documents for the connector
-        """
-        raise NotImplementedError
-
 
 class IdRetrievalCapable(abc.ABC):
     """
@@ -361,7 +352,6 @@ class HybridCapable(abc.ABC):
         time_decay_multiplier: float,
         num_to_retrieve: int,
         ranking_profile_type: QueryExpansionType,
-        offset: int = 0,
         title_content_ratio: float | None = TITLE_CONTENT_RATIO,
     ) -> list[InferenceChunk]:
         """
@@ -386,7 +376,6 @@ class HybridCapable(abc.ABC):
         - time_decay_multiplier: how much to decay the document scores as they age. Some queries
                 based on the persona settings, will have this be a 2x or 3x of the default
         - num_to_retrieve: number of highest matching chunks to return
-        - offset: number of highest matching chunks to skip (kind of like pagination)
 
         Returns:
             best matching chunks based on weighted sum of keyword and vector/semantic search scores
@@ -411,9 +400,9 @@ class AdminCapable(abc.ABC):
     def admin_retrieval(
         self,
         query: str,
+        query_embedding: Embedding,
         filters: IndexFilters,
-        num_to_retrieve: int,
-        offset: int = 0,
+        num_to_retrieve: int = NUM_RETURNED_HITS,
     ) -> list[InferenceChunk]:
         """
         Run the special search for the admin document explorer page
@@ -422,7 +411,6 @@ class AdminCapable(abc.ABC):
         - query: unmodified user query. Though in this flow probably unmodified is best
         - filters: standard filter object
         - num_to_retrieve: number of highest matching chunks to return
-        - offset: number of highest matching chunks to skip (kind of like pagination)
 
         Returns:
             list of best matching chunks for the explorer page query

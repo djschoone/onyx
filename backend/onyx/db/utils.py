@@ -10,7 +10,10 @@ from onyx.db.models import Base
 
 
 def model_to_dict(model: Base) -> dict[str, Any]:
-    return {c.key: getattr(model, c.key) for c in inspect(model).mapper.column_attrs}  # type: ignore
+    return {
+        c.key: getattr(model, c.key)
+        for c in inspect(model).mapper.column_attrs  # ty: ignore[unresolved-attribute]
+    }
 
 
 RETRYABLE_PG_CODES = {
@@ -40,3 +43,10 @@ class DocumentRow(BaseModel):
 class SortOrder(str, Enum):
     ASC = "asc"
     DESC = "desc"
+
+
+class DiscordChannelView(BaseModel):
+    channel_id: int
+    channel_name: str
+    channel_type: str = "text"  # text, forum
+    is_private: bool = False  # True if @everyone cannot view the channel

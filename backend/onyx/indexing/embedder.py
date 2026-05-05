@@ -3,23 +3,28 @@ from abc import ABC
 from abc import abstractmethod
 from collections import defaultdict
 
+import sentry_sdk
+
 from onyx.connectors.models import ConnectorFailure
 from onyx.connectors.models import ConnectorStopSignal
 from onyx.connectors.models import DocumentFailure
 from onyx.db.models import SearchSettings
+from onyx.document_index.chunk_content_enrichment import (
+    generate_enriched_content_for_chunk_embedding,
+)
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.indexing.models import ChunkEmbedding
 from onyx.indexing.models import DocAwareChunk
 from onyx.indexing.models import IndexChunk
 from onyx.natural_language_processing.search_nlp_models import EmbeddingModel
 from onyx.utils.logger import setup_logger
+from onyx.utils.pydantic_util import shallow_model_dump
 from onyx.utils.timing import log_function_time
 from shared_configs.configs import INDEXING_MODEL_SERVER_HOST
 from shared_configs.configs import INDEXING_MODEL_SERVER_PORT
 from shared_configs.enums import EmbeddingProvider
 from shared_configs.enums import EmbedTextType
 from shared_configs.model_server_models import Embedding
-
 
 logger = setup_logger()
 
@@ -126,7 +131,7 @@ class DefaultIndexingEmbedder(IndexingEmbedder):
             if chunk.large_chunk_reference_ids:
                 large_chunks_present = True
             chunk_text = (
-                f"{chunk.title_prefix}{chunk.doc_summary}{chunk.content}{chunk.chunk_context}{chunk.metadata_suffix_semantic}"
+                generate_enriched_content_for_chunk_embedding(chunk)
             ) or chunk.source_document.get_title_for_document_index()
 
             if not chunk_text:
@@ -207,8 +212,8 @@ class DefaultIndexingEmbedder(IndexingEmbedder):
                     )[0]
                     title_embed_dict[title] = title_embedding
 
-            new_embedded_chunk = IndexChunk(
-                **chunk.model_dump(),
+            new_embedded_chunk = IndexChunk.model_construct(
+                **shallow_model_dump(chunk),
                 embeddings=ChunkEmbedding(
                     full_embedding=chunk_embeddings[0],
                     mini_chunk_embeddings=chunk_embeddings[1:],
@@ -287,6 +292,13 @@ def embed_chunks_with_failure_handling(
             )
             embedded_chunks.extend(doc_embedded_chunks)
         except Exception as e:
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("stage", "embedding")
+                scope.set_tag("doc_id", doc_id)
+                if tenant_id:
+                    scope.set_tag("tenant_id", tenant_id)
+                scope.fingerprint = ["embedding-failure", type(e).__name__]
+                sentry_sdk.capture_exception(e)
             logger.exception(f"Failed to embed chunks for document '{doc_id}'")
             failures.append(
                 ConnectorFailure(

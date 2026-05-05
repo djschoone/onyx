@@ -24,6 +24,7 @@ from onyx.connectors.interfaces import SecondsSinceUnixEpoch
 from onyx.connectors.models import BasicExpertInfo
 from onyx.connectors.models import ConnectorMissingCredentialError
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import TextSection
 from onyx.file_processing.extract_file_text import detect_encoding
 from onyx.file_processing.extract_file_text import extract_file_text
@@ -32,7 +33,6 @@ from onyx.file_processing.extract_file_text import read_text_file
 from onyx.file_processing.file_types import OnyxFileExtensions
 from onyx.utils.logger import setup_logger
 from onyx.utils.retry_wrapper import request_with_retries
-
 
 logger = setup_logger()
 
@@ -131,8 +131,7 @@ class EgnyteConnector(LoadConnector, PollConnector, OAuthConnector):
         egnyte_domain: str = Field(
             title="Egnyte Domain",
             description=(
-                "The domain for the Egnyte instance "
-                "(e.g. 'company' for company.egnyte.com)"
+                "The domain for the Egnyte instance (e.g. 'company' for company.egnyte.com)"
             ),
         )
 
@@ -278,8 +277,8 @@ class EgnyteConnector(LoadConnector, PollConnector, OAuthConnector):
         self,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
-    ) -> Generator[list[Document], None, None]:
-        current_batch: list[Document] = []
+    ) -> Generator[list[Document | HierarchyNode], None, None]:
+        current_batch: list[Document | HierarchyNode] = []
 
         # Iterate through yielded files and filter them
         for file in self._get_files_list(self.folder_path):

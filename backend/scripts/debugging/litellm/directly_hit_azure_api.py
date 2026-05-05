@@ -16,7 +16,6 @@ from pathlib import Path
 
 import httpx
 
-
 # Configuration: Update these values before running
 URL = "https://YOUR_AZURE_OPENAI_DEPLOYMENT_URL_HERE.cognitiveservices.azure.com/"
 API_KEY = "YOUR_API_KEY_HERE"
@@ -28,8 +27,7 @@ def _load_payload_json() -> dict:
     """Load and parse payload.json file."""
     if not PAYLOAD_PATH.exists():
         raise FileNotFoundError(
-            f"payload.json not found at {PAYLOAD_PATH!r}. "
-            "Create payload.json next to this script."
+            f"payload.json not found at {PAYLOAD_PATH!r}. Create payload.json next to this script."
         )
     return json.loads(PAYLOAD_PATH.read_text())
 

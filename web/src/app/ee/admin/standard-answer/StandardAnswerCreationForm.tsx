@@ -1,6 +1,6 @@
 "use client";
 
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import { StandardAnswerCategory, StandardAnswer } from "@/lib/types";
 import CardSection from "@/components/admin/CardSection";
 import Button from "@/refresh-components/buttons/Button";
@@ -38,13 +38,11 @@ export const StandardAnswerCreationForm = ({
   existingStandardAnswer?: StandardAnswer;
 }) => {
   const isUpdate = existingStandardAnswer !== undefined;
-  const { popup, setPopup } = usePopup();
   const router = useRouter();
 
   return (
     <div>
       <CardSection>
-        {popup}
         <Formik
           initialValues={{
             keyword: existingStandardAnswer
@@ -99,12 +97,11 @@ export const StandardAnswerCreationForm = ({
             } else {
               const responseJson = await response.json();
               const errorMsg = responseJson.detail || responseJson.message;
-              setPopup({
-                message: isUpdate
+              toast.error(
+                isUpdate
                   ? `Error updating Standard Answer - ${errorMsg}`
-                  : `Error creating Standard Answer - ${errorMsg}`,
-                type: "error",
-              });
+                  : `Error creating Standard Answer - ${errorMsg}`
+              );
             }
           }}
         >
@@ -124,7 +121,6 @@ export const StandardAnswerCreationForm = ({
                   label="Any of these keywords, separated by spaces"
                   tooltip="A question must match these keywords in order to trigger the answer."
                   placeholder="ticket problem issue"
-                  autoCompleteDisabled={true}
                 />
               ) : (
                 <TextFormField
@@ -132,7 +128,6 @@ export const StandardAnswerCreationForm = ({
                   label="All of these keywords, in any order, separated by spaces"
                   tooltip="A question must match these keywords in order to trigger the answer."
                   placeholder="it ticket"
-                  autoCompleteDisabled={true}
                 />
               )}
               <BooleanFormField
@@ -203,6 +198,7 @@ export const StandardAnswerCreationForm = ({
                 />
               </div>
               <div className="py-4 flex">
+                {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
                 <Button
                   type="submit"
                   disabled={isSubmitting}

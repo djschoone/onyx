@@ -6,6 +6,8 @@ from typing import Optional
 import braintrust
 from braintrust import NOOP_SPAN
 
+from onyx.llm.cost import calculate_llm_cost_cents
+
 from .framework.processor_interface import TracingProcessor
 from .framework.span_data import AgentSpanData
 from .framework.span_data import FunctionSpanData
@@ -130,21 +132,29 @@ class BraintrustTracingProcessor(TracingProcessor):
         if total_latency is not None:
             metrics["total_latency_seconds"] = total_latency
 
-        usage = span.span_data.usage or {}
-        if "prompt_tokens" in usage:
-            metrics["prompt_tokens"] = usage["prompt_tokens"]
-        elif "input_tokens" in usage:
-            metrics["prompt_tokens"] = usage["input_tokens"]
+        if span.span_data.time_to_first_action_seconds is not None:
+            metrics["time_to_first_action_seconds"] = (
+                span.span_data.time_to_first_action_seconds
+            )
 
-        if "completion_tokens" in usage:
-            metrics["completion_tokens"] = usage["completion_tokens"]
-        elif "output_tokens" in usage:
-            metrics["completion_tokens"] = usage["output_tokens"]
+        usage = span.span_data.usage or {}
+        prompt_tokens = None
+        completion_tokens = None
+        prompt_tokens = usage.get("prompt_tokens")
+        if prompt_tokens is None:
+            prompt_tokens = usage.get("input_tokens")
+        if prompt_tokens is not None:
+            metrics["prompt_tokens"] = int(prompt_tokens)
+        completion_tokens = usage.get("completion_tokens")
+        if completion_tokens is None:
+            completion_tokens = usage.get("output_tokens")
+        if completion_tokens is not None:
+            metrics["completion_tokens"] = int(completion_tokens)
 
         if "total_tokens" in usage:
             metrics["tokens"] = usage["total_tokens"]
-        elif "input_tokens" in usage and "output_tokens" in usage:
-            metrics["tokens"] = usage["input_tokens"] + usage["output_tokens"]
+        elif prompt_tokens is not None and completion_tokens is not None:
+            metrics["tokens"] = prompt_tokens + completion_tokens
 
         if "cache_read_input_tokens" in usage:
             metrics["prompt_cached_tokens"] = usage["cache_read_input_tokens"]
@@ -153,13 +163,29 @@ class BraintrustTracingProcessor(TracingProcessor):
                 "cache_creation_input_tokens"
             ]
 
+        model_name = span.span_data.model
+        if model_name and prompt_tokens is not None and completion_tokens is not None:
+            cost_cents = calculate_llm_cost_cents(
+                model_name=model_name,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            if cost_cents > 0:
+                metrics["cost_cents"] = cost_cents
+
+        metadata: Dict[str, Any] = {
+            "model": span.span_data.model,
+            "model_config": span.span_data.model_config,
+        }
+
+        # Include reasoning in metadata if present
+        if span.span_data.reasoning:
+            metadata["reasoning"] = span.span_data.reasoning
+
         return {
             "input": span.span_data.input,
             "output": span.span_data.output,
-            "metadata": {
-                "model": span.span_data.model,
-                "model_config": span.span_data.model_config,
-            },
+            "metadata": metadata,
             "metrics": metrics,
         }
 
@@ -180,15 +206,10 @@ class BraintrustTracingProcessor(TracingProcessor):
             else self._spans[span.trace_id]
         )
         trace_metadata = self._trace_metadata.get(span.trace_id)
-        span_name = _span_name(span)
         if isinstance(span.span_data, GenerationSpanData):
-            parent_name = (
-                self._span_names.get(span.parent_id)
-                if span.parent_id is not None
-                else self._span_names.get(span.trace_id)
-            )
-            if parent_name:
-                span_name = parent_name
+            span_name = _generation_span_name(span)
+        else:
+            span_name = _span_name(span)
         span_kwargs: Dict[str, Any] = dict(
             id=span.span_id,
             name=span_name,
@@ -233,3 +254,14 @@ class BraintrustTracingProcessor(TracingProcessor):
             self._logger.flush()
         else:
             braintrust.flush()
+
+
+def _generation_span_name(span: Span[SpanData]) -> str:
+    data = span.span_data
+    if isinstance(data, GenerationSpanData):
+        model_config = data.model_config
+        if isinstance(model_config, dict):
+            flow = model_config.get("flow")
+            if isinstance(flow, str) and flow.strip():
+                return flow
+    return _span_name(span)

@@ -1,5 +1,5 @@
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import Text from "@/refresh-components/texts/Text";
 import { SvgCheck } from "@opal/icons";
 export interface GenericConfirmModalProps {
@@ -19,7 +19,7 @@ export default function GenericConfirmModal({
 }: GenericConfirmModalProps) {
   return (
     <Modal open onOpenChange={onClose}>
-      <Modal.Content small>
+      <Modal.Content width="sm" height="sm">
         <Modal.Header icon={SvgCheck} title={title} onClose={onClose} />
         <Modal.Body>
           <Text as="p">{message}</Text>

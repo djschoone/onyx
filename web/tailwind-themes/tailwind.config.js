@@ -12,6 +12,12 @@ module.exports = {
     transparent: "transparent",
     current: "currentColor",
     extend: {
+      lineClamp: {
+        7: "7",
+        8: "8",
+        9: "9",
+        10: "10",
+      },
       transitionProperty: {
         spacing: "margin, padding",
       },
@@ -54,17 +60,19 @@ module.exports = {
         "neutral-10": "var(--neutral-10) 5%",
       },
       screens: {
+        sm: "724px",
+        md: "912px",
+        lg: "1232px",
         "2xl": "1420px",
         "3xl": "1700px",
         "4xl": "2000px",
-        mobile: { max: "767px" },
-        desktop: "768px",
+        mobile: { max: "724px" },
         tall: { raw: "(min-height: 800px)" },
         short: { raw: "(max-height: 799px)" },
         "very-short": { raw: "(max-height: 600px)" },
       },
       fontFamily: {
-        sans: ["Hanken Grotesk", "var(--font-inter)", "sans-serif"],
+        sans: ["Hanken Grotesk", "sans-serif"],
         hanken: ["Hanken Grotesk", "sans-serif"],
       },
       width: {
@@ -249,6 +257,7 @@ module.exports = {
         "code-string": "var(--code-string)",
         "code-number": "var(--code-number)",
         "code-definition": "var(--code-definition)",
+        "background-code-01": "var(--background-code-01)",
 
         // Shimmer colors for loading animations
         "shimmer-base": "var(--shimmer-base)",
@@ -348,12 +357,23 @@ module.exports = {
         /^(fill-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(?:50|100|200|300|400|500|600|700|800|900|950))$/,
     },
   ],
+  // Note: @tailwindcss/container-queries plugin is not needed here.
+  // Container queries (@container, cqw units) are native in Tailwind v4+.
+  // After upgrading to Tailwind 4, this comment can be removed.
   plugins: [
     require("@tailwindcss/typography"),
     require("@headlessui/tailwindcss"),
     require("tailwindcss-animate"),
+    require("@tailwindcss/container-queries"),
     plugin(({ addVariant }) => {
       addVariant("focus-within-nonactive", "&:focus-within:not(:active)");
+    }),
+    plugin(({ addUtilities }) => {
+      addUtilities({
+        ".break-anywhere": {
+          "overflow-wrap": "anywhere",
+        },
+      });
     }),
   ],
 };

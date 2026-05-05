@@ -1,5 +1,6 @@
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 
 import jwt
 import requests
@@ -8,15 +9,14 @@ from onyx.server.manage.models import AllUsersResponse
 from onyx.server.models import FullUserSnapshot
 from onyx.server.models import InvitedUserSnapshot
 from tests.integration.common_utils.constants import API_SERVER_URL
-from tests.integration.common_utils.constants import GENERAL_HEADERS
 from tests.integration.common_utils.test_models import DATestUser
 
 
 def generate_auth_token() -> str:
     payload = {
         "iss": "control_plane",
-        "exp": datetime.utcnow() + timedelta(minutes=5),
-        "iat": datetime.utcnow(),
+        "exp": datetime.now(tz=timezone.utc) + timedelta(minutes=5),
+        "iat": datetime.now(tz=timezone.utc),
         "scope": "tenant:create",
     }
     token = jwt.encode(payload, "", algorithm="HS256")
@@ -26,15 +26,11 @@ def generate_auth_token() -> str:
 class TenantManager:
     @staticmethod
     def get_all_users(
-        user_performing_action: DATestUser | None = None,
+        user_performing_action: DATestUser,
     ) -> AllUsersResponse:
         response = requests.get(
             url=f"{API_SERVER_URL}/manage/users",
-            headers=(
-                user_performing_action.headers
-                if user_performing_action
-                else GENERAL_HEADERS
-            ),
+            headers=user_performing_action.headers,
         )
         response.raise_for_status()
 
@@ -50,7 +46,8 @@ class TenantManager:
 
     @staticmethod
     def verify_user_in_tenant(
-        user: DATestUser, user_performing_action: DATestUser | None = None
+        user: DATestUser,
+        user_performing_action: DATestUser,
     ) -> None:
         all_users = TenantManager.get_all_users(user_performing_action)
         for accepted_user in all_users.accepted:

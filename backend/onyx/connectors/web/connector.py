@@ -1,4 +1,3 @@
-import io
 import ipaddress
 import random
 import socket
@@ -19,10 +18,12 @@ from playwright.sync_api import BrowserContext
 from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
 from playwright.sync_api import TimeoutError
-from requests_oauthlib import OAuth2Session  # type:ignore
+from requests_oauthlib import OAuth2Session
+from typing_extensions import override
 from urllib3.exceptions import MaxRetryError
 
 from onyx.configs.app_configs import INDEX_BATCH_SIZE
+from onyx.configs.app_configs import REQUEST_TIMEOUT_SECONDS
 from onyx.configs.app_configs import WEB_CONNECTOR_OAUTH_CLIENT_ID
 from onyx.configs.app_configs import WEB_CONNECTOR_OAUTH_CLIENT_SECRET
 from onyx.configs.app_configs import WEB_CONNECTOR_OAUTH_TOKEN_URL
@@ -33,13 +34,20 @@ from onyx.connectors.exceptions import CredentialExpiredError
 from onyx.connectors.exceptions import InsufficientPermissionsError
 from onyx.connectors.exceptions import UnexpectedValidationError
 from onyx.connectors.interfaces import GenerateDocumentsOutput
+from onyx.connectors.interfaces import GenerateSlimDocumentOutput
 from onyx.connectors.interfaces import LoadConnector
+from onyx.connectors.interfaces import SecondsSinceUnixEpoch
+from onyx.connectors.interfaces import SlimConnector
 from onyx.connectors.models import Document
+from onyx.connectors.models import HierarchyNode
+from onyx.connectors.models import SlimDocument
 from onyx.connectors.models import TextSection
-from onyx.file_processing.extract_file_text import read_pdf_file
 from onyx.file_processing.html_utils import web_html_cleanup
+from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.logger import setup_logger
 from onyx.utils.sitemap import list_pages_for_site
+from onyx.utils.web_content import extract_pdf_text
+from onyx.utils.web_content import is_pdf_resource
 from shared_configs.configs import MULTI_TENANT
 
 logger = setup_logger()
@@ -53,8 +61,6 @@ class ScrapeSessionContext:
         self.to_visit = to_visit
         self.visited_links: set[str] = set()
         self.content_hashes: set[int] = set()
-
-        self.doc_batch: list[Document] = []
 
         self.at_least_one_doc: bool = False
         self.last_error: str | None = None
@@ -87,14 +93,12 @@ WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS = 20
 IFRAME_TEXT_LENGTH_THRESHOLD = 700
 # Message indicating JavaScript is disabled, which often appears when scraping fails
 JAVASCRIPT_DISABLED_MESSAGE = "You have JavaScript disabled in your browser"
-# Grace period after page navigation to allow bot-detection challenges to complete
-BOT_DETECTION_GRACE_PERIOD_MS = 5000
+# Grace period after page navigation to allow bot-detection challenges
+# and SPA content rendering to complete
+PAGE_RENDER_TIMEOUT_MS = 5000
 
 # Define common headers that mimic a real browser
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-)
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 DEFAULT_HEADERS = {
     "User-Agent": DEFAULT_USER_AGENT,
     "Accept": (
@@ -115,16 +119,6 @@ DEFAULT_HEADERS = {
     "Sec-CH-UA-Mobile": "?0",
     "Sec-CH-UA-Platform": '"macOS"',
 }
-
-# Common PDF MIME types
-PDF_MIME_TYPES = [
-    "application/pdf",
-    "application/x-pdf",
-    "application/acrobat",
-    "application/vnd.pdf",
-    "text/pdf",
-    "text/x-pdf",
-]
 
 
 class WEB_CONNECTOR_VALID_SETTINGS(str, Enum):
@@ -268,12 +262,6 @@ def get_internal_links(
     return internal_links
 
 
-def is_pdf_content(response: requests.Response) -> bool:
-    """Check if the response contains PDF content based on content-type header"""
-    content_type = response.headers.get("content-type", "").lower()
-    return any(pdf_type in content_type for pdf_type in PDF_MIME_TYPES)
-
-
 def start_playwright() -> Tuple[Playwright, BrowserContext]:
     playwright = sync_playwright().start()
 
@@ -359,7 +347,9 @@ def extract_urls_from_sitemap(sitemap_url: str) -> list[str]:
     # a regression as someone says "Ah, looks like this brotli package isn't used anywhere, let's remove it"
     # import brotli
     try:
-        response = requests.get(sitemap_url, headers=DEFAULT_HEADERS)
+        response = requests.get(
+            sitemap_url, headers=DEFAULT_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
         soup = BeautifulSoup(response.content, "html.parser")
         urls = [
@@ -446,7 +436,7 @@ def _handle_cookies(context: BrowserContext, url: str) -> None:
         # Add cookies to the context
         for cookie in cookies:
             try:
-                context.add_cookies([cookie])  # type: ignore
+                context.add_cookies([cookie])  # ty: ignore[invalid-argument-type]
             except Exception as e:
                 logger.debug(f"Failed to add cookie {cookie['name']} for {domain}: {e}")
     except Exception:
@@ -455,7 +445,7 @@ def _handle_cookies(context: BrowserContext, url: str) -> None:
         )
 
 
-class WebConnector(LoadConnector):
+class WebConnector(LoadConnector, SlimConnector):
     MAX_RETRIES = 3
 
     def __init__(
@@ -465,7 +455,7 @@ class WebConnector(LoadConnector):
         mintlify_cleanup: bool = True,  # Mostly ok to apply to other websites as well
         batch_size: int = INDEX_BATCH_SIZE,
         scroll_before_scraping: bool = False,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002
     ) -> None:
         self.mintlify_cleanup = mintlify_cleanup
         self.batch_size = batch_size
@@ -491,14 +481,13 @@ class WebConnector(LoadConnector):
                 )
 
             logger.warning(
-                "This is not a UI supported Web Connector flow, "
-                "are you sure you want to do this?"
+                "This is not a UI supported Web Connector flow, are you sure you want to do this?"
             )
             self.to_visit_list = _read_urls_file(base_url)
 
         else:
             raise ValueError(
-                "Invalid Web Connector Config, must choose a valid type between: " ""
+                "Invalid Web Connector Config, must choose a valid type between: "
             )
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
@@ -511,8 +500,14 @@ class WebConnector(LoadConnector):
         index: int,
         initial_url: str,
         session_ctx: ScrapeSessionContext,
+        slim: bool = False,
     ) -> ScrapeResult:
-        """Returns a ScrapeResult object with a doc and retry flag."""
+        """Returns a ScrapeResult object with a doc and retry flag.
+
+        When slim=True, skips scroll, PDF content download, and content extraction.
+        The bot-detection render wait (5s) fires on CF/403 responses regardless of slim.
+        networkidle is always awaited so JS-rendered links are discovered correctly.
+        """
 
         if session_ctx.playwright is None:
             raise RuntimeError("scrape_context.playwright is None")
@@ -527,16 +522,29 @@ class WebConnector(LoadConnector):
 
         # First do a HEAD request to check content type without downloading the entire content
         head_response = requests.head(
-            initial_url, headers=DEFAULT_HEADERS, allow_redirects=True
+            initial_url,
+            headers=DEFAULT_HEADERS,
+            allow_redirects=True,
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
-        is_pdf = is_pdf_content(head_response)
+        content_type = head_response.headers.get("content-type")
+        is_pdf = is_pdf_resource(initial_url, content_type)
 
-        if is_pdf or initial_url.lower().endswith(".pdf"):
-            # PDF files are not checked for links
-            response = requests.get(initial_url, headers=DEFAULT_HEADERS)
-            page_text, metadata, images = read_pdf_file(
-                file=io.BytesIO(response.content)
+        if is_pdf:
+            if slim:
+                result.doc = Document(
+                    id=initial_url,
+                    sections=[],
+                    source=DocumentSource.WEB,
+                    semantic_identifier=initial_url,
+                    metadata={},
+                )
+                return result
+
+            response = requests.get(
+                initial_url, headers=DEFAULT_HEADERS, timeout=REQUEST_TIMEOUT_SECONDS
             )
+            page_text, metadata = extract_pdf_text(response.content)
             last_modified = response.headers.get("Last-Modified")
 
             result.doc = Document(
@@ -565,9 +573,23 @@ class WebConnector(LoadConnector):
                 timeout=30000,  # 30 seconds
                 wait_until="commit",  # Wait for navigation to commit
             )
-            # Give the page a moment to start rendering after navigation commits.
-            # Allows CloudFlare and other bot-detection challenges to complete.
-            page.wait_for_timeout(BOT_DETECTION_GRACE_PERIOD_MS)
+
+            # Bot-detection JS challenges (CloudFlare, Imperva, etc.) need a moment
+            # to start network activity after commit before networkidle is meaningful.
+            # We detect this via the cf-ray header (CloudFlare) or a 403 response,
+            # which is the common entry point for JS-challenge-based bot detection.
+            is_bot_challenge = page_response is not None and (
+                page_response.header_value("cf-ray") is not None
+                or page_response.status == 403
+            )
+            if is_bot_challenge:
+                page.wait_for_timeout(PAGE_RENDER_TIMEOUT_MS)
+
+            # Wait for network activity to settle (handles SPAs, CF challenges, etc.)
+            try:
+                page.wait_for_load_state("networkidle", timeout=PAGE_RENDER_TIMEOUT_MS)
+            except TimeoutError:
+                pass
 
             last_modified = (
                 page_response.header_value("Last-Modified") if page_response else None
@@ -587,27 +609,39 @@ class WebConnector(LoadConnector):
                 session_ctx.visited_links.add(initial_url)
 
             # If we got here, the request was successful
-            if self.scroll_before_scraping:
-                scroll_attempts = 0
-                previous_height = page.evaluate("document.body.scrollHeight")
-                while scroll_attempts < WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS:
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    # Wait for content to load, but catch timeout if page never reaches networkidle
-                    # (e.g., CloudFlare protection keeps making requests)
-                    try:
-                        page.wait_for_load_state(
-                            "networkidle", timeout=BOT_DETECTION_GRACE_PERIOD_MS
-                        )
-                    except TimeoutError:
-                        # If networkidle times out, just give it a moment for content to render
-                        time.sleep(1)
-                    time.sleep(0.5)  # let javascript run
+            if not slim and self.scroll_before_scraping:
+                try:
+                    # document.body can be null for non-HTML responses,
+                    # transient frame-nav states, or pages rendered without
+                    # a body (e.g. pure XML, some SPAs mid-navigation). That
+                    # surfaces as "Page.evaluate: TypeError: Cannot read
+                    # properties of null (reading 'scrollHeight')"
+                    # (ONYX-BACKEND-H6G5). Skip auto-scroll in that case and
+                    # fall back to whatever content the initial load gave us.
+                    scroll_attempts = 0
+                    previous_height = page.evaluate("document.body.scrollHeight")
+                    while scroll_attempts < WEB_CONNECTOR_MAX_SCROLL_ATTEMPTS:
+                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        # Wait for content to load, but catch timeout if page never reaches networkidle
+                        # (e.g., CloudFlare protection keeps making requests)
+                        try:
+                            page.wait_for_load_state(
+                                "networkidle", timeout=PAGE_RENDER_TIMEOUT_MS
+                            )
+                        except TimeoutError:
+                            # If networkidle times out, just give it a moment for content to render
+                            time.sleep(1)
+                        time.sleep(0.5)  # let javascript run
 
-                    new_height = page.evaluate("document.body.scrollHeight")
-                    if new_height == previous_height:
-                        break  # Stop scrolling when no more content is loaded
-                    previous_height = new_height
-                    scroll_attempts += 1
+                        new_height = page.evaluate("document.body.scrollHeight")
+                        if new_height == previous_height:
+                            break  # Stop scrolling when no more content is loaded
+                        previous_height = new_height
+                        scroll_attempts += 1
+                except Exception as scroll_err:
+                    logger.warning(
+                        f"{index}: auto-scroll skipped for {initial_url}: {scroll_err}"
+                    )
 
             content = page.content()
             soup = BeautifulSoup(content, "html.parser")
@@ -624,6 +658,16 @@ class WebConnector(LoadConnector):
                 session_ctx.last_error = f"Skipped indexing {initial_url} due to HTTP {page_response.status} response"
                 logger.info(session_ctx.last_error)
                 result.retry = True
+                return result
+
+            if slim:
+                result.doc = Document(
+                    id=initial_url,
+                    sections=[],
+                    source=DocumentSource.WEB,
+                    semantic_identifier=initial_url,
+                    metadata={},
+                )
                 return result
 
             # after this point, we don't need the caller to retry
@@ -677,9 +721,13 @@ class WebConnector(LoadConnector):
 
         return result
 
-    def load_from_state(self) -> GenerateDocumentsOutput:
-        """Traverses through all pages found on the website
-        and converts them into documents"""
+    def load_from_state(self, slim: bool = False) -> GenerateDocumentsOutput:
+        """Traverses through all pages found on the website and converts them into
+        documents.
+
+        When slim=True, yields SlimDocument objects (URL id only, no content).
+        Playwright is used in all modes — slim skips content extraction only.
+        """
 
         if not self.to_visit_list:
             raise ValueError("No URLs to visit")
@@ -689,6 +737,8 @@ class WebConnector(LoadConnector):
 
         session_ctx = ScrapeSessionContext(base_url, self.to_visit_list)
         session_ctx.initialize()
+
+        batch: list[Document | SlimDocument | HierarchyNode] = []
 
         while session_ctx.to_visit:
             initial_url = session_ctx.to_visit.pop()
@@ -704,7 +754,9 @@ class WebConnector(LoadConnector):
                 continue
 
             index = len(session_ctx.visited_links)
-            logger.info(f"{index}: Visiting {initial_url}")
+            logger.info(
+                f"{index}: {'Slim-visiting' if slim else 'Visiting'} {initial_url}"
+            )
 
             # Add retry mechanism with exponential backoff
             retry_count = 0
@@ -719,12 +771,14 @@ class WebConnector(LoadConnector):
                     time.sleep(delay)
 
                 try:
-                    result = self._do_scrape(index, initial_url, session_ctx)
+                    result = self._do_scrape(index, initial_url, session_ctx, slim=slim)
                     if result.retry:
                         continue
 
                     if result.doc:
-                        session_ctx.doc_batch.append(result.doc)
+                        batch.append(
+                            SlimDocument(id=result.doc.id) if slim else result.doc
+                        )
                 except Exception as e:
                     session_ctx.last_error = f"Failed to fetch '{initial_url}': {e}"
                     logger.exception(session_ctx.last_error)
@@ -735,16 +789,16 @@ class WebConnector(LoadConnector):
 
                 break  # success / don't retry
 
-            if len(session_ctx.doc_batch) >= self.batch_size:
+            if len(batch) >= self.batch_size:
                 session_ctx.initialize()
                 session_ctx.at_least_one_doc = True
-                yield session_ctx.doc_batch
-                session_ctx.doc_batch = []
+                yield batch  # ty: ignore[invalid-yield]
+                batch = []
 
-        if session_ctx.doc_batch:
+        if batch:
             session_ctx.stop()
             session_ctx.at_least_one_doc = True
-            yield session_ctx.doc_batch
+            yield batch  # ty: ignore[invalid-yield]
 
         if not session_ctx.at_least_one_doc:
             if session_ctx.last_error:
@@ -752,6 +806,22 @@ class WebConnector(LoadConnector):
             raise RuntimeError("No valid pages found.")
 
         session_ctx.stop()
+
+    @override
+    def retrieve_all_slim_docs(
+        self,
+        start: SecondsSinceUnixEpoch | None = None,
+        end: SecondsSinceUnixEpoch | None = None,
+        callback: IndexingHeartbeatInterface | None = None,
+    ) -> GenerateSlimDocumentOutput:
+        """Yields SlimDocuments for all pages reachable from the configured URLs.
+
+        Uses the same Playwright crawl as full indexing but skips content extraction,
+        scroll, and PDF downloads. The 5s render wait fires only on bot-detection
+        responses (CloudFlare cf-ray header or HTTP 403).
+        The start/end parameters are ignored — WEB connector has no incremental path.
+        """
+        yield from self.load_from_state(slim=True)  # ty: ignore[invalid-yield]
 
     def validate_connector_settings(self) -> None:
         # Make sure we have at least one valid URL to check

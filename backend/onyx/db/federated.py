@@ -14,6 +14,7 @@ from onyx.db.models import FederatedConnector
 from onyx.db.models import FederatedConnector__DocumentSet
 from onyx.db.models import FederatedConnectorOAuthToken
 from onyx.federated_connectors.factory import get_federated_connector
+from onyx.utils.encryption import reject_masked_credentials
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -66,6 +67,8 @@ def create_federated_connector(
     config: dict[str, Any] | None = None,
 ) -> FederatedConnector:
     """Create a new federated connector with credential and config validation."""
+    reject_masked_credentials(credentials)
+
     # Validate credentials before creating
     if not validate_federated_connector_credentials(source, credentials):
         raise ValueError(
@@ -111,7 +114,7 @@ def update_federated_connector_oauth_token(
 
     if existing_token:
         # Update existing token
-        existing_token.token = token
+        existing_token.token = token  # ty: ignore[invalid-assignment]
         existing_token.expires_at = expires_at
         db_session.commit()
         return existing_token
@@ -267,10 +270,18 @@ def update_federated_connector(
     # Use provided credentials if updating them, otherwise use existing credentials
     # This is needed to instantiate the connector for config validation when only config is being updated
     creds_to_use = (
-        credentials if credentials is not None else federated_connector.credentials
+        credentials
+        if credentials is not None
+        else (
+            federated_connector.credentials.get_value(apply_mask=False)
+            if federated_connector.credentials
+            else {}
+        )
     )
 
     if credentials is not None:
+        reject_masked_credentials(credentials)
+
         # Validate credentials before updating
         if not validate_federated_connector_credentials(
             federated_connector.source, credentials
@@ -278,7 +289,7 @@ def update_federated_connector(
             raise ValueError(
                 f"Invalid credentials for federated connector source: {federated_connector.source}"
             )
-        federated_connector.credentials = credentials
+        federated_connector.credentials = credentials  # ty: ignore[invalid-assignment]
 
     if config is not None:
         # Validate config using connector-specific validation

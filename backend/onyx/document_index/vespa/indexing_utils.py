@@ -16,10 +16,12 @@ from retry import retry
 from onyx.connectors.cross_connector_utils.miscellaneous_utils import (
     get_experts_stores_representations,
 )
+from onyx.document_index.chunk_content_enrichment import (
+    generate_enriched_content_for_chunk_text,
+)
 from onyx.document_index.document_index_utils import get_uuid_from_chunk
 from onyx.document_index.document_index_utils import get_uuid_from_chunk_info_old
 from onyx.document_index.interfaces import MinimalDocumentIndexingInfo
-from onyx.document_index.vespa.shared_utils.utils import remove_invalid_unicode_chars
 from onyx.document_index.vespa.shared_utils.utils import (
     replace_invalid_doc_id_characters,
 )
@@ -37,12 +39,14 @@ from onyx.document_index.vespa_constants import DOCUMENT_ID
 from onyx.document_index.vespa_constants import DOCUMENT_ID_ENDPOINT
 from onyx.document_index.vespa_constants import DOCUMENT_SETS
 from onyx.document_index.vespa_constants import EMBEDDINGS
+from onyx.document_index.vespa_constants import FULL_CHUNK_EMBEDDING_KEY
 from onyx.document_index.vespa_constants import IMAGE_FILE_NAME
 from onyx.document_index.vespa_constants import LARGE_CHUNK_REFERENCE_IDS
 from onyx.document_index.vespa_constants import METADATA
 from onyx.document_index.vespa_constants import METADATA_LIST
 from onyx.document_index.vespa_constants import METADATA_SUFFIX
 from onyx.document_index.vespa_constants import NUM_THREADS
+from onyx.document_index.vespa_constants import PERSONAS
 from onyx.document_index.vespa_constants import PRIMARY_OWNERS
 from onyx.document_index.vespa_constants import SECONDARY_OWNERS
 from onyx.document_index.vespa_constants import SECTION_CONTINUATION
@@ -56,7 +60,7 @@ from onyx.document_index.vespa_constants import TITLE_EMBEDDING
 from onyx.document_index.vespa_constants import USER_PROJECT
 from onyx.indexing.models import DocMetadataAwareIndexChunk
 from onyx.utils.logger import setup_logger
-
+from onyx.utils.text_processing import remove_invalid_unicode_chars
 
 logger = setup_logger()
 
@@ -149,7 +153,7 @@ def _index_vespa_chunk(
 
     embeddings = chunk.embeddings
 
-    embeddings_name_vector_map = {"full_chunk": embeddings.full_embedding}
+    embeddings_name_vector_map = {FULL_CHUNK_EMBEDDING_KEY: embeddings.full_embedding}
 
     if embeddings.mini_chunk_embeddings:
         for ind, m_c_embed in enumerate(embeddings.mini_chunk_embeddings):
@@ -183,7 +187,7 @@ def _index_vespa_chunk(
         # For the BM25 index, the keyword suffix is used, the vector is already generated with the more
         # natural language representation of the metadata section
         CONTENT: remove_invalid_unicode_chars(
-            f"{chunk.title_prefix}{chunk.doc_summary}{chunk.content}{chunk.chunk_context}{chunk.metadata_suffix_keyword}"
+            generate_enriched_content_for_chunk_text(chunk)
         ),
         # This duplication of `content` is needed for keyword highlighting
         # Note that it's not exactly the same as the actual content
@@ -214,6 +218,7 @@ def _index_vespa_chunk(
         # still called `image_file_name` in Vespa for backwards compatibility
         IMAGE_FILE_NAME: chunk.image_file_id,
         USER_PROJECT: chunk.user_project if chunk.user_project is not None else [],
+        PERSONAS: chunk.personas if chunk.personas is not None else [],
         BOOST: chunk.boost,
         AGGREGATED_CHUNK_BOOST_FACTOR: chunk.aggregated_chunk_boost_factor,
     }
@@ -250,8 +255,7 @@ def _index_vespa_chunk(
                     continue
                 else:
                     raise RuntimeError(
-                        f"Failed to index document '{document.id}' after {INDEXING_MAX_RETRIES} attempts "
-                        f"due to rate limiting"
+                        f"Failed to index document '{document.id}' after {INDEXING_MAX_RETRIES} attempts due to rate limiting"
                     ) from e
             elif e.response.status_code == HTTPStatus.INSUFFICIENT_STORAGE:
                 logger.error(
@@ -385,7 +389,7 @@ class BaseHTTPXClientContext(ABC):
         pass
 
     @abstractmethod
-    def __exit__(self, exc_type, exc_value, traceback):  # type: ignore
+    def __exit__(self, exc_type, exc_value, traceback):
         pass
 
 
@@ -398,7 +402,7 @@ class GlobalHTTPXClientContext(BaseHTTPXClientContext):
     def __enter__(self) -> httpx.Client:
         return self._client  # Reuse the global client
 
-    def __exit__(self, exc_type, exc_value, traceback):  # type: ignore
+    def __exit__(self, exc_type, exc_value, traceback):
         pass  # Do nothing; don't close the global client
 
 
@@ -413,6 +417,6 @@ class TemporaryHTTPXClientContext(BaseHTTPXClientContext):
         self._client = self._client_factory()  # Create a new client
         return self._client
 
-    def __exit__(self, exc_type, exc_value, traceback):  # type: ignore
+    def __exit__(self, exc_type, exc_value, traceback):
         if self._client:
             self._client.close()

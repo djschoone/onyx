@@ -31,7 +31,8 @@ def fetch_query_analytics(
             func.sum(case((ChatMessageFeedback.is_positive, 1), else_=0)),
             func.sum(
                 case(
-                    (ChatMessageFeedback.is_positive == False, 1), else_=0  # noqa: E712
+                    (ChatMessageFeedback.is_positive == False, 1),  # noqa: E712
+                    else_=0,  # noqa: E712
                 )
             ),
             cast(ChatMessage.time_sent, Date),
@@ -52,7 +53,7 @@ def fetch_query_analytics(
         .order_by(cast(ChatMessage.time_sent, Date))
     )
 
-    return db_session.execute(stmt).all()  # type: ignore
+    return db_session.execute(stmt).all()  # ty: ignore[invalid-return-type]
 
 
 def fetch_per_user_query_analytics(
@@ -66,7 +67,8 @@ def fetch_per_user_query_analytics(
             func.sum(case((ChatMessageFeedback.is_positive, 1), else_=0)),
             func.sum(
                 case(
-                    (ChatMessageFeedback.is_positive == False, 1), else_=0  # noqa: E712
+                    (ChatMessageFeedback.is_positive == False, 1),  # noqa: E712
+                    else_=0,  # noqa: E712
                 )
             ),
             cast(ChatMessage.time_sent, Date),
@@ -90,7 +92,7 @@ def fetch_per_user_query_analytics(
         .order_by(cast(ChatMessage.time_sent, Date), ChatSession.user_id)
     )
 
-    return db_session.execute(stmt).all()  # type: ignore
+    return db_session.execute(stmt).all()  # ty: ignore[invalid-return-type]
 
 
 def fetch_onyxbot_analytics(
@@ -334,11 +336,9 @@ def fetch_assistant_unique_users_total(
 # Users can view assistant stats if they created the persona,
 # or if they are an admin
 def user_can_view_assistant_stats(
-    db_session: Session, user: User | None, assistant_id: int
+    db_session: Session, user: User, assistant_id: int
 ) -> bool:
-    # If user is None and auth is disabled, assume the user is an admin
-
-    if user is None or user.role == UserRole.ADMIN:
+    if user.role == UserRole.ADMIN:
         return True
 
     # Check if the user created the persona
