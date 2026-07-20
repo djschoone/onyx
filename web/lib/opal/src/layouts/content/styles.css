@@ -1,3 +1,5 @@
+@reference "#reference.css";
+
 /* ===========================================================================
    Content — Shared color properties
 
@@ -42,6 +44,12 @@
 [data-content-color="danger"] {
   --content-foreground: var(--status-error-05);
   --content-foreground-icon: var(--status-error-05);
+  color: var(--content-foreground);
+}
+
+[data-content-color="warning"] {
+  --content-foreground: var(--status-warning-05);
+  --content-foreground-icon: var(--status-warning-05);
   color: var(--content-foreground);
 }
 

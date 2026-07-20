@@ -347,7 +347,7 @@ def run_functions_tuples_in_parallel(
                 try:
                     results.append((index, future.result()))
                 except Exception as e:
-                    logger.exception(f"Function at index {index} failed due to {e}")
+                    logger.exception("Function at index %s failed due to %s", index, e)
                     results.append((index, None))
                     if not allow_failures:
                         raise
@@ -357,7 +357,7 @@ def run_functions_tuples_in_parallel(
                 index = future_to_index[future]
                 func, args = functions_with_args[index]
                 logger.warning(
-                    f"Function at index {index} timed out after {timeout} seconds"
+                    "Function at index %s timed out after %s seconds", index, timeout
                 )
 
                 if timeout_callback:
@@ -378,7 +378,7 @@ def run_functions_tuples_in_parallel(
                 try:
                     results.append((index, future.result()))
                 except Exception as e:
-                    logger.exception(f"Function at index {index} failed due to {e}")
+                    logger.exception("Function at index %s failed due to %s", index, e)
                     results.append((index, None))
 
                     if not allow_failures:
@@ -437,7 +437,7 @@ def run_functions_in_parallel(
             try:
                 results[result_id] = future.result()
             except Exception as e:
-                logger.exception(f"Function with ID {result_id} failed due to {e}")
+                logger.exception("Function with ID %s failed due to %s", result_id, e)
                 results[result_id] = None
 
                 if not allow_failures:
@@ -480,6 +480,32 @@ def run_multiple_in_background(
     for func in funcs:
         executor.submit(ctx.run, func)
     return executor
+
+
+def start_thread_with_context(
+    target: Callable[..., Any],
+    *,
+    name: str | None = None,
+    daemon: bool = False,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+) -> threading.Thread:
+    """Spawn a fire-and-forget thread that inherits the caller's contextvars
+    (tenant id, request id, trace context). A raw ``threading.Thread`` starts
+    with an empty context, so tenant-scoped DB access inside the thread would
+    raise "Tenant ID is not set".
+
+    Unlike ``run_in_background`` / ``run_multiple_in_background``, this is for
+    daemon producer threads that are never joined.
+    """
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(
+        target=lambda: ctx.run(target, *args, **(kwargs or {})),
+        name=name,
+        daemon=daemon,
+    )
+    thread.start()
+    return thread
 
 
 class TimeoutThread(threading.Thread, Generic[R]):

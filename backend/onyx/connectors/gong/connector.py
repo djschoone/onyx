@@ -7,6 +7,7 @@ from datetime import timedelta
 from datetime import timezone
 from typing import Any
 from typing import cast
+from urllib.parse import urlparse
 
 import requests
 from pydantic import BaseModel
@@ -77,7 +78,10 @@ class _CursorExpiredError(Exception):
 
 
 class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
-    BASE_URL = "https://api.gong.io"
+    # Default US host. Overridable per-credential via `gong_base_url` for
+    # non-US data-residency tenants (region-specific host like
+    # https://<region>.api.gong.io).
+    DEFAULT_BASE_URL = "https://api.gong.io"
     # Max number of attempts to resolve missing call details across checkpoint
     # invocations before giving up and emitting ConnectorFailure.
     MAX_CALL_DETAILS_ATTEMPTS = 6
@@ -99,24 +103,29 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
         self.auth_token_basic: str | None = None
         self.hide_user_info = hide_user_info
         self._last_request_time: float = 0.0
+        self.base_url = GongConnector.DEFAULT_BASE_URL
 
         # urllib3 Retry already respects the Retry-After header by default
         # (respect_retry_after_header=True), so on 429 it will sleep for the
         # duration Gong specifies before retrying.
-        retry_strategy = Retry(
+        self._retry_strategy = Retry(
             total=10,
             backoff_factor=2,
             status_forcelist=[429, 500, 502, 503, 504],
         )
 
-        session = requests.Session()
-        session.mount(GongConnector.BASE_URL, HTTPAdapter(max_retries=retry_strategy))
-        self._session = session
+        self._session = requests.Session()
+        self._mount_retry_adapter()
 
-    @staticmethod
-    def make_url(endpoint: str) -> str:
-        url = f"{GongConnector.BASE_URL}{endpoint}"
-        return url
+    def _mount_retry_adapter(self) -> None:
+        # Retry adapters are matched by URL prefix, so the mount must track
+        # base_url whenever it changes (e.g. an EU host from credentials).
+        self._session.mount(
+            self.base_url, HTTPAdapter(max_retries=self._retry_strategy)
+        )
+
+    def make_url(self, endpoint: str) -> str:
+        return f"{self.base_url}{endpoint}"
 
     def _throttled_request(
         self, method: str, url: str, **kwargs: Any
@@ -133,9 +142,7 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
         return response
 
     def _get_workspace_id_map(self) -> dict[str, str]:
-        response = self._throttled_request(
-            "GET", GongConnector.make_url("/v2/workspaces")
-        )
+        response = self._throttled_request("GET", self.make_url("/v2/workspaces"))
         response.raise_for_status()
 
         workspaces_details = response.json().get("workspaces")
@@ -172,7 +179,7 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
             body["cursor"] = cursor
 
         response = self._throttled_request(
-            "POST", GongConnector.make_url("/v2/calls/transcript"), json=body
+            "POST", self.make_url("/v2/calls/transcript"), json=body
         )
         # If no calls in the range, return empty
         if response.status_code == 404:
@@ -183,7 +190,7 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
             # detect it before raise_for_status so callers can restart the workspace.
             if cursor and "cursor has expired" in response.text.lower():
                 raise _CursorExpiredError(response.text)
-            logger.error(f"Error fetching transcripts: {response.text}")
+            logger.error("Error fetching transcripts: %s", response.text)
             response.raise_for_status()
 
         data = response.json()
@@ -199,7 +206,7 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
         }
 
         response = self._throttled_request(
-            "POST", GongConnector.make_url("/v2/calls/extensive"), json=body
+            "POST", self.make_url("/v2/calls/extensive"), json=body
         )
         response.raise_for_status()
 
@@ -248,7 +255,7 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
         for workspace in self.workspaces:
             workspace_id = workspace_map.get(workspace)
             if not workspace_id:
-                logger.error(f"Invalid Gong workspace: {workspace}")
+                logger.error("Invalid Gong workspace: %s", workspace)
                 continue
             resolved.append(workspace_id)
 
@@ -304,12 +311,15 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
         call_time_str = call_metadata["started"]
         call_title = call_metadata["title"]
         logger.info(
-            f"Indexing Gong call id {call_id} from {call_time_str.split('T', 1)[0]}: {call_title}"
+            "Indexing Gong call id %s from %s: %s",
+            call_id,
+            call_time_str.split("T", 1)[0],
+            call_title,
         )
 
         call_parties = cast(list[dict] | None, call_details.get("parties"))
         if call_parties is None:
-            logger.error(f"Couldn't get parties for Call ID: {call_id}")
+            logger.error("Couldn't get parties for Call ID: %s", call_id)
             call_parties = []
 
         id_to_name_map = self._parse_parties(call_parties)
@@ -395,9 +405,8 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
 
         if newly_stashed:
             logger.warning(
-                f"Gong call details not yet available (race condition); "
-                f"deferring to next checkpoint invocation: "
-                f"call_ids={newly_stashed}"
+                "Gong call details not yet available (race condition); deferring to next checkpoint invocation: call_ids=%s",
+                newly_stashed,
             )
             # First attempt on any newly-stashed transcripts counts as attempt #1.
             # pending_call_details_attempts is guaranteed 0 here because
@@ -407,6 +416,25 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
             checkpoint.pending_retry_after = time.time() + self._next_retry_delay(1)
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
+        base_url = credentials.get("gong_base_url")
+        if base_url:
+            base_url = base_url.strip().rstrip("/")
+            lower_url = base_url.lower()
+            if lower_url.startswith("http://"):
+                raise ValueError("gong_base_url must use https")
+            if not lower_url.startswith("https://"):
+                base_url = f"https://{base_url}"
+            # Restrict to Gong API hosts to avoid pointing requests (which carry
+            # the credential) at arbitrary or internal addresses.
+            host = (urlparse(base_url).hostname or "").rstrip(".").lower()
+            if host != "api.gong.io" and not host.endswith(".api.gong.io"):
+                raise ValueError(
+                    "gong_base_url must be a Gong API host "
+                    "(api.gong.io or a region-specific *.api.gong.io host)"
+                )
+            self.base_url = base_url
+            self._mount_retry_adapter()
+
         combined = (
             f"{credentials['gong_access_key']}:{credentials['gong_access_key_secret']}"
         )
@@ -467,8 +495,11 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
             start, end
         )
         logger.info(
-            f"Fetching Gong calls between {start_time} and {end_time} "
-            f"(workspace {checkpoint.workspace_index + 1}/{len(workspace_ids)})"
+            "Fetching Gong calls between %s and %s (workspace %s/%s)",
+            start_time,
+            end_time,
+            checkpoint.workspace_index + 1,
+            len(workspace_ids),
         )
 
         workspace_id = workspace_ids[checkpoint.workspace_index]
@@ -488,9 +519,9 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
             # Document upserts are idempotent (keyed by call_id) so
             # reprocessing is safe.
             logger.warning(
-                f"Gong pagination cursor expired for workspace "
-                f"{checkpoint.workspace_index + 1}/{len(workspace_ids)}; "
-                f"restarting workspace from beginning of time range."
+                "Gong pagination cursor expired for workspace %s/%s; restarting workspace from beginning of time range.",
+                checkpoint.workspace_index + 1,
+                len(workspace_ids),
             )
             checkpoint.cursor = None
             checkpoint.has_more = True
@@ -560,17 +591,17 @@ class GongConnector(CheckpointedConnector[GongConnectorCheckpoint]):
 
         checkpoint.pending_call_details_attempts += 1
         logger.warning(
-            f"Gong call details still missing after "
-            f"{checkpoint.pending_call_details_attempts}/"
-            f"{self.MAX_CALL_DETAILS_ATTEMPTS} attempts: "
-            f"missing_call_ids={list(checkpoint.pending_transcripts.keys())}"
+            "Gong call details still missing after %s/%s attempts: missing_call_ids=%s",
+            checkpoint.pending_call_details_attempts,
+            self.MAX_CALL_DETAILS_ATTEMPTS,
+            list(checkpoint.pending_transcripts.keys()),
         )
 
         if checkpoint.pending_call_details_attempts >= self.MAX_CALL_DETAILS_ATTEMPTS:
             logger.error(
-                f"Giving up on missing Gong call details after "
-                f"{self.MAX_CALL_DETAILS_ATTEMPTS} attempts: "
-                f"missing_call_ids={list(checkpoint.pending_transcripts.keys())}"
+                "Giving up on missing Gong call details after %s attempts: missing_call_ids=%s",
+                self.MAX_CALL_DETAILS_ATTEMPTS,
+                list(checkpoint.pending_transcripts.keys()),
             )
             for call_id in list(checkpoint.pending_transcripts.keys()):
                 yield ConnectorFailure(

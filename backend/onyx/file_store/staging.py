@@ -68,6 +68,22 @@ def build_raw_file_callback(
     return _callback
 
 
+def build_tracking_raw_file_callback(
+    *, metadata: dict[str, Any]
+) -> tuple[RawFileCallback, list[str]]:
+    """Staging callback for connector runs that have no index attempt for the
+    standard staging reapers to key on. Returns the callback plus the list of ids
+    it stages, so the caller can reap them once it has read them."""
+    staged_ids: list[str] = []
+
+    def _callback(content: IO[bytes], content_type: str) -> str:
+        file_id = stage_raw_file(content, content_type, metadata=metadata)
+        staged_ids.append(file_id)
+        return file_id
+
+    return _callback, staged_ids
+
+
 def delete_files_best_effort(
     file_ids: list[str],
     context: str = "document cleanup",
@@ -85,11 +101,12 @@ def delete_files_best_effort(
             deleted += 1
         except Exception:
             logger.exception(
-                f"[{context}] Failed to delete file_id={file_id}; will be "
-                "retried on next sweep."
+                "[%s] Failed to delete file_id=%s; will be retried on next sweep.",
+                context,
+                file_id,
             )
     if deleted:
-        logger.info(f"[{context}] reaped {deleted} file(s)")
+        logger.info("[%s] reaped %s file(s)", context, deleted)
     return deleted
 
 

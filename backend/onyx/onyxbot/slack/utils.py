@@ -1,4 +1,3 @@
-import logging
 import random
 import re
 import string
@@ -10,7 +9,6 @@ from contextlib import contextmanager
 from typing import Any
 from typing import cast
 
-from retry import retry
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from slack_sdk.models.blocks import Block
@@ -34,9 +32,9 @@ from onyx.onyxbot.slack.constants import FeedbackVisibility
 from onyx.onyxbot.slack.models import ChannelType
 from onyx.onyxbot.slack.models import ThreadMessage
 from onyx.utils.logger import setup_logger
+from onyx.utils.retry_wrapper import retry_builder
 from onyx.utils.telemetry import optional_telemetry
 from onyx.utils.telemetry import RecordType
-from onyx.utils.text_processing import replace_whitespaces_w_space
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 
 logger = setup_logger()
@@ -106,15 +104,18 @@ def get_channel_type_from_id(web_client: WebClient, channel_id: str) -> ChannelT
                 return ChannelType.PUBLIC_CHANNEL  # Public channel
             else:
                 logger.warning(
-                    f"Could not determine channel type for {channel_id}, defaulting to unknown"
+                    "Could not determine channel type for %s, defaulting to unknown",
+                    channel_id,
                 )
                 return ChannelType.UNKNOWN
         else:
-            logger.warning(f"Invalid channel info response for {channel_id}")
+            logger.warning("Invalid channel info response for %s", channel_id)
             return ChannelType.UNKNOWN
     except Exception as e:
         logger.warning(
-            f"Error getting channel info for {channel_id}, defaulting to unknown: {e}"
+            "Error getting channel info for %s, defaulting to unknown: %s",
+            channel_id,
+            e,
         )
         return ChannelType.UNKNOWN
 
@@ -135,9 +136,11 @@ def check_message_limit() -> bool:
         _ONYX_BOT_COUNT_START_TIME = time.time()
     if (_ONYX_BOT_MESSAGE_COUNT + 1) > ONYX_BOT_RESPONSE_LIMIT_PER_TIME_PERIOD:
         logger.error(
-            f"OnyxBot has reached the message limit {ONYX_BOT_RESPONSE_LIMIT_PER_TIME_PERIOD}"
-            f" for the time period {ONYX_BOT_RESPONSE_LIMIT_TIME_PERIOD_SECONDS} seconds."
-            " These limits are configurable in backend/onyx/configs/onyxbot_configs.py"
+            "OnyxBot has reached the message limit %s"
+            " for the time period %s seconds."
+            " These limits are configurable in backend/onyx/configs/onyxbot_configs.py",
+            ONYX_BOT_RESPONSE_LIMIT_PER_TIME_PERIOD,
+            ONYX_BOT_RESPONSE_LIMIT_TIME_PERIOD_SECONDS,
         )
         return False
     _ONYX_BOT_MESSAGE_COUNT += 1
@@ -153,7 +156,11 @@ def update_emote_react(
 ) -> None:
     if not message_ts:
         action = "remove" if remove else "add"
-        logger.error(f"update_emote_react - no message specified: {channel=} {action=}")
+        logger.error(
+            "update_emote_react - no message specified: channel=%s action=%s",
+            channel,
+            action,
+        )
         return
 
     if remove:
@@ -164,7 +171,7 @@ def update_emote_react(
                 timestamp=message_ts,
             )
         except SlackApiError as e:
-            logger.error(f"Failed to remove Reaction due to: {e}")
+            logger.error("Failed to remove Reaction due to: %s", e)
 
         return
 
@@ -175,7 +182,7 @@ def update_emote_react(
             timestamp=message_ts,
         )
     except SlackApiError as e:
-        logger.error(f"Was not able to react to user message due to: {e}")
+        logger.error("Was not able to react to user message due to: %s", e)
 
     return
 
@@ -223,11 +230,10 @@ def _build_error_block(error_message: str) -> Block:
     return SectionBlock(text=display_text)
 
 
-@retry(
+@retry_builder(
     tries=ONYX_BOT_NUM_RETRIES,
     delay=0.25,
     backoff=2,
-    logger=cast(logging.Logger, logger),
 )
 def respond_in_thread_or_channel(
     client: WebClient,
@@ -257,7 +263,7 @@ def respond_in_thread_or_channel(
             )
         except Exception as e:
             blocks_str = str(blocks)[:1024]  # truncate block logging
-            logger.warning(f"Failed to post message: {e} \n blocks: {blocks_str}")
+            logger.warning("Failed to post message: %s \n blocks: %s", e, blocks_str)
             logger.warning("Trying again without blocks that have urls")
 
             if not blocks:
@@ -295,7 +301,9 @@ def respond_in_thread_or_channel(
                 )
             except Exception as e:
                 blocks_str = str(blocks)[:1024]  # truncate block logging
-                logger.warning(f"Failed to post message: {e} \n blocks: {blocks_str}")
+                logger.warning(
+                    "Failed to post message: %s \n blocks: %s", e, blocks_str
+                )
                 logger.warning("Trying again without blocks that have urls")
 
                 if not blocks:
@@ -404,28 +412,6 @@ def get_view_values(state_values: dict[str, Any]) -> dict[str, str]:
     return view_values
 
 
-def translate_vespa_highlight_to_slack(match_strs: list[str], used_chars: int) -> str:
-    def _replace_highlight(s: str) -> str:
-        s = re.sub(r"(?<=[^\s])<hi>(.*?)</hi>", r"\1", s)
-        s = s.replace("</hi>", "*").replace("<hi>", "*")
-        return s
-
-    final_matches = [
-        replace_whitespaces_w_space(_replace_highlight(match_str)).strip()
-        for match_str in match_strs
-        if match_str
-    ]
-    combined = "... ".join(final_matches)
-
-    # Slack introduces "Show More" after 300 on desktop which is ugly
-    # But don't trim the message if there is still a highlight after 300 chars
-    remaining = 300 - used_chars
-    if len(combined) > remaining and "*" not in combined[remaining:]:
-        combined = combined[: remaining - 3] + "..."
-
-    return combined
-
-
 def remove_slack_text_interactions(slack_str: str) -> str:
     slack_str = SlackTextCleaner.replace_tags_basic(slack_str)
     slack_str = SlackTextCleaner.replace_channels_basic(slack_str)
@@ -450,7 +436,7 @@ def get_channel_name_from_id(
         is_dm = any([channel_info.get("is_im"), channel_info.get("is_mpim")])
         return name, is_dm
     except SlackApiError as e:
-        logger.exception(f"Couldn't fetch channel name from id: {channel_id}")
+        logger.exception("Couldn't fetch channel name from id: %s", channel_id)
         raise e
 
 
@@ -466,7 +452,7 @@ def fetch_slack_user_ids_from_emails(
                 user.data["user"]["id"]  # ty: ignore[invalid-argument-type]
             )
         except Exception:
-            logger.error(f"Was not able to find slack user by email: {email}")
+            logger.error("Was not able to find slack user by email: %s", email)
             failed_to_find.append(email)
 
     return user_ids, failed_to_find
@@ -500,10 +486,10 @@ def fetch_user_ids_from_groups(
                 else:
                     failed_to_find.append(given_name)
             except Exception as e:
-                logger.error(f"Error fetching user group ids: {str(e)}")
+                logger.error("Error fetching user group ids: %s", e)
                 failed_to_find.append(given_name)
     except Exception as e:
-        logger.error(f"Error fetching user groups: {str(e)}")
+        logger.error("Error fetching user groups: %s", e)
         failed_to_find = given_names
 
     return user_ids, failed_to_find
@@ -535,7 +521,7 @@ def fetch_group_ids_from_names(
                 failed_to_find.append(given_name)
     except Exception as e:
         failed_to_find = given_names
-        logger.error(f"Error fetching user groups: {str(e)}")
+        logger.error("Error fetching user groups: %s", e)
 
     return group_data, failed_to_find
 
@@ -603,7 +589,7 @@ def read_slack_thread(
                 # auto-detected filters
                 blocks = reply.get("blocks")
                 if not blocks:
-                    logger.warning(f"OnyxBot response has no blocks: {reply}")
+                    logger.warning("OnyxBot response has no blocks: %s", reply)
                     continue
 
                 message = blocks[0].get("text", {}).get("text")
@@ -612,7 +598,7 @@ def read_slack_thread(
                 # The first block is the auto-detected filters
                 if message is not None and message.startswith("_Filters"):
                     if len(blocks) < 2:
-                        logger.warning(f"Only filter blocks found: {reply}")
+                        logger.warning("Only filter blocks found: %s", reply)
                         continue
                     # This is the OnyxBot answer format, if there is a change to how we respond,
                     # this will need to be updated to get the correct "answer" portion

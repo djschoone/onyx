@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import tempfile
 import zipfile
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -26,6 +27,7 @@ from PIL import Image
 
 from onyx.configs.app_configs import MAX_EMBEDDED_IMAGES_PER_FILE
 from onyx.configs.app_configs import MAX_XLSX_CELLS_PER_SHEET
+from onyx.configs.app_configs import PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS
 from onyx.configs.constants import ONYX_METADATA_FILENAME
 from onyx.configs.llm_configs import get_image_extraction_and_analysis_enabled
 from onyx.file_processing.file_types import OnyxFileExtensions
@@ -36,6 +38,8 @@ from onyx.file_processing.html_utils import parse_html_page_basic
 from onyx.file_processing.unstructured import get_unstructured_api_key
 from onyx.file_processing.unstructured import unstructured_to_text
 from onyx.utils.logger import setup_logger
+from onyx.utils.process_isolation import IsolatedProcessError
+from onyx.utils.process_isolation import run_in_isolated_process
 
 if TYPE_CHECKING:
     from markitdown import MarkItDown
@@ -269,6 +273,33 @@ def pdf_to_text(file: IO[Any], pdf_pass: str | None = None) -> str:
     return text
 
 
+def _extract_pdf_text_pdfium(file_bytes: bytes, password: str | None) -> str:
+    """Extract all text from a PDF via pypdfium2 (PDFium/C).
+
+    PDFium releases the GIL while parsing, so a large or complex PDF can't pin
+    a worker thread or stall the indexing heartbeat during text extraction.
+    """
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(file_bytes, password=password)
+    try:
+        page_texts: list[str] = []
+        for page in pdf:
+            # Per-page try/finally so a get_textpage() failure still closes the
+            # native page handle instead of leaking it until GC.
+            try:
+                textpage = page.get_textpage()
+                try:
+                    page_texts.append(textpage.get_text_range())
+                finally:
+                    textpage.close()
+            finally:
+                page.close()
+        return TEXT_SECTION_SEPARATOR.join(page_texts)
+    finally:
+        pdf.close()
+
+
 def read_pdf_file(
     file: IO[Any],
     pdf_pass: str | None = None,
@@ -280,12 +311,16 @@ def read_pdf_file(
     """
     from pypdf import PdfReader
     from pypdf.errors import PdfStreamError
+    from pypdfium2 import PdfiumError
 
     metadata: dict[str, Any] = {}
     extracted_images: list[tuple[bytes, str]] = []
     try:
-        pdf_reader = PdfReader(file)
+        # Read once: the text extractor and the metadata/image reader share these bytes.
+        file_bytes = file.read()
+        pdf_reader = PdfReader(io.BytesIO(file_bytes))
 
+        decrypt_password: str | None = None
         if pdf_reader.is_encrypted:
             # Try the explicit password first, then fall back to an empty
             # string.  Owner-password-only PDFs (permission restrictions but
@@ -297,6 +332,7 @@ def read_pdf_file(
                 try:
                     if pdf_reader.decrypt(pw) != 0:
                         decrypt_success = True
+                        decrypt_password = pw
                         break
                 except Exception:
                     pass
@@ -318,9 +354,23 @@ def read_pdf_file(
                 ):
                     metadata[clean_key] = ", ".join(value)
 
-        text = TEXT_SECTION_SEPARATOR.join(
-            page.extract_text() for page in pdf_reader.pages
-        )
+        # PDFium can hard-abort or hang on a malformed PDF (uncatchable in-process),
+        # so run it isolated; a crash, timeout, or PdfiumError falls back to pypdf.
+        try:
+            text = run_in_isolated_process(
+                _extract_pdf_text_pdfium,
+                file_bytes,
+                decrypt_password,
+                timeout=PDF_TEXT_EXTRACTION_TIMEOUT_SECONDS,
+            )
+        except (PdfiumError, IsolatedProcessError) as pdfium_err:
+            logger.warning(
+                "PDFium text extraction failed (%s); falling back to pypdf",
+                pdfium_err,
+            )
+            text = TEXT_SECTION_SEPARATOR.join(
+                page.extract_text() for page in pdf_reader.pages
+            )
 
         if extract_images:
             image_cap = MAX_EMBEDDED_IMAGES_PER_FILE
@@ -360,10 +410,17 @@ def read_pdf_file(
 
         return text, metadata, extracted_images
 
-    except PdfStreamError:
-        logger.exception("Invalid PDF file")
-    except Exception:
-        logger.exception("Failed to read PDF")
+    except PdfStreamError as e:
+        # Malformed/truncated PDF content — a per-document content issue, not
+        # a platform bug. The function returns empty text and the connector
+        # continues with the next doc; no need to ship a stack trace to
+        # Sentry for every corrupt file we encounter.
+        logger.warning("Invalid PDF file, skipping content extraction: %s", e)
+    except Exception as e:
+        # Unknown PDF parsing failure — elevate just the message, not a
+        # traceback, for the same reason. Callers treat empty text as a
+        # non-fatal skip.
+        logger.warning("Failed to read PDF, skipping content extraction: %s", e)
 
     return "", metadata, []
 
@@ -446,7 +503,9 @@ def read_docx_file(
         UnsupportedFormatException,
     ) as e:
         logger.warning(
-            f"Failed to extract docx {file_name or 'docx file'}: {e}. Attempting to read as text file."
+            "Failed to extract docx %s: %s. Attempting to read as text file.",
+            file_name or "docx file",
+            e,
         )
 
         # May be an invalid docx, but still a valid text file
@@ -471,6 +530,20 @@ def read_docx_file(
     return doc.markdown, []
 
 
+def extract_pptx_images(pptx_bytes: IO[Any]) -> Iterator[tuple[bytes, str]]:
+    """
+    Given the bytes of a pptx file, extract all the images.
+    Returns an iterator of tuples (image_bytes, image_name).
+    """
+    try:
+        with zipfile.ZipFile(pptx_bytes) as z:
+            for name in z.namelist():
+                if name.startswith("ppt/media/"):
+                    yield (z.read(name), name.split("/")[-1])
+    except Exception:
+        logger.exception("Failed to extract all pptx images")
+
+
 def pptx_to_text(file: IO[Any], file_name: str = "") -> str:
     md = get_markitdown_converter()
     from markitdown import FileConversionException
@@ -492,6 +565,31 @@ def pptx_to_text(file: IO[Any], file_name: str = "") -> str:
         logger.warning(error_str)
         return ""
     return presentation.markdown
+
+
+def read_pptx_file(
+    file: IO[Any],
+    file_name: str = "",
+    extract_images: bool = False,
+    image_callback: Callable[[bytes, str], None] | None = None,
+) -> tuple[str, Sequence[tuple[bytes, str]]]:
+    """
+    Extract text and optionally images from a pptx.
+    Return (text_content, list_of_images).
+    """
+    text = pptx_to_text(file, file_name=file_name)
+
+    file.seek(0)
+
+    if extract_images:
+        if image_callback is None:
+            return text, list(extract_pptx_images(to_bytesio(file)))
+        try:
+            for img_file_bytes, img_file_name in extract_pptx_images(to_bytesio(file)):
+                image_callback(img_file_bytes, img_file_name)
+        except Exception:
+            logger.exception("Failed to stream pptx images")
+    return text, []
 
 
 def _columns_to_keep(col_has_data: bytearray, max_empty: int) -> list[int]:
@@ -573,6 +671,30 @@ def _sheet_to_csv(rows: Iterator[tuple[Any, ...]]) -> str:
     return buf.getvalue().rstrip("\n")
 
 
+def _load_readonly_workbook(file: IO[Any], file_name: str) -> openpyxl.Workbook | None:
+    """Load a read-only workbook, returning None (and logging) for the BadZipFile
+    / known-openpyxl-bug cases the xlsx indexers treat as skip-and-continue rather
+    than a hard failure."""
+    try:
+        return openpyxl.load_workbook(file, read_only=True)
+    except BadZipFile as e:
+        error_str = f"Failed to extract text from {file_name or 'xlsx file'}: {e}"
+        if file_name.startswith("~"):
+            logger.debug(error_str + " (this is expected for files with ~)")
+        else:
+            logger.warning(error_str)
+        return None
+    except Exception as e:
+        if any(s in str(e) for s in KNOWN_OPENPYXL_BUGS):
+            logger.warning(
+                "Failed to extract text from %s. This happens due to a bug in openpyxl. %s",
+                file_name or "xlsx file",
+                e,
+            )
+            return None
+        raise
+
+
 def xlsx_sheet_extraction(file: IO[Any], file_name: str = "") -> list[tuple[str, str]]:
     """
     Converts each sheet in the excel file to a csv condensed string.
@@ -580,22 +702,9 @@ def xlsx_sheet_extraction(file: IO[Any], file_name: str = "") -> list[tuple[str,
 
     Returns a list of (csv_text, sheet)
     """
-    try:
-        workbook = openpyxl.load_workbook(file, read_only=True)
-    except BadZipFile as e:
-        error_str = f"Failed to extract text from {file_name or 'xlsx file'}: {e}"
-        if file_name.startswith("~"):
-            logger.debug(error_str + " (this is expected for files with ~)")
-        else:
-            logger.warning(error_str)
+    workbook = _load_readonly_workbook(file, file_name)
+    if workbook is None:
         return []
-    except Exception as e:
-        if any(s in str(e) for s in KNOWN_OPENPYXL_BUGS):
-            logger.warning(
-                f"Failed to extract text from {file_name or 'xlsx file'}. This happens due to a bug in openpyxl. {e}"
-            )
-            return []
-        raise
 
     sheets: list[tuple[str, str]] = []
     try:
@@ -608,6 +717,54 @@ def xlsx_sheet_extraction(file: IO[Any], file_name: str = "") -> list[tuple[str,
     finally:
         workbook.close()
 
+    return sheets
+
+
+class StreamedSheet(NamedTuple):
+    """One worksheet rendered to CSV, staged in the file store, and referenced
+    by `csv_file_id`."""
+
+    title: str
+    csv_file_id: str
+
+
+def _row_has_content(row: tuple[Any, ...]) -> bool:
+    return any(v is not None and v != "" for v in row)
+
+
+def _cell(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def stage_xlsx_sheets(
+    file: IO[bytes],
+    stage: Callable[[IO[bytes], str], str],
+    file_name: str = "",
+) -> list[StreamedSheet]:
+    """Stream each non-empty worksheet to a temp CSV row by row (never holding a
+    full sheet in memory), then stage it via `stage` and reference it by
+    `csv_file_id`. Empty rows are dropped; columns are not trimmed."""
+    sheets: list[StreamedSheet] = []
+    workbook = _load_readonly_workbook(file, file_name)
+    if workbook is None:
+        return sheets
+    try:
+        for sheet in workbook.worksheets:
+            ro_sheet = cast(ReadOnlyWorksheet, sheet)
+            ro_sheet.reset_dimensions()
+            with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as tmp:
+                writer = csv.writer(tmp, lineterminator="\n")
+                for row in ro_sheet.iter_rows(values_only=True):
+                    if _row_has_content(row):
+                        writer.writerow([_cell(v) for v in row])
+                tmp.flush()
+                binary = cast(IO[bytes], tmp.buffer)
+                if binary.seek(0, io.SEEK_END) == 0:
+                    continue
+                binary.seek(0)
+                sheets.append(StreamedSheet(ro_sheet.title, stage(binary, "text/csv")))
+    finally:
+        workbook.close()
     return sheets
 
 
@@ -630,7 +787,8 @@ def eml_to_text(file: IO[Any]) -> str:
             raw_file = text_file.detach()
         except Exception as detach_error:
             logger.warning(
-                f"Failed to detach TextIOWrapper for EML upload, using original file: {detach_error}"
+                "Failed to detach TextIOWrapper for EML upload, using original file: %s",
+                detach_error,
             )
             raw_file = file
         try:
@@ -647,7 +805,7 @@ def eml_to_text(file: IO[Any]) -> str:
             elif isinstance(payload, list):
                 text_content.extend(item for item in payload if isinstance(item, str))
             else:
-                logger.warning(f"Unexpected payload type: {type(payload)}")
+                logger.warning("Unexpected payload type: %s", type(payload))
     return TEXT_SECTION_SEPARATOR.join(text_content)
 
 
@@ -696,7 +854,8 @@ def extract_file_text(
                 return unstructured_to_text(file, file_name)
             except Exception as unstructured_error:
                 logger.error(
-                    f"Failed to process with Unstructured: {str(unstructured_error)}. Falling back to normal processing."
+                    "Failed to process with Unstructured: %s. Falling back to normal processing.",
+                    str(unstructured_error),
                 )
         if extension is None:
             extension = get_file_ext(file_name)
@@ -718,7 +877,7 @@ def extract_file_text(
             raise RuntimeError(
                 f"Failed to process file {file_name or 'Unknown'}: {str(e)}"
             ) from e
-        logger.warning(f"Failed to process file {file_name or 'Unknown'}: {str(e)}")
+        logger.warning("Failed to process file %s: %s", file_name or "Unknown", str(e))
         return ""
 
 
@@ -775,7 +934,7 @@ def extract_text_and_images(
     )
     # Clean up any temporary objects and force garbage collection
     unreachable = gc.collect()
-    logger.info(f"Unreachable objects: {unreachable}")
+    logger.info("Unreachable objects: %s", unreachable)
 
     return res
 
@@ -797,7 +956,8 @@ def _extract_text_and_images(
             )
         except Exception as e:
             logger.error(
-                f"Failed to process with Unstructured: {str(e)}. Falling back to normal processing."
+                "Failed to process with Unstructured: %s. Falling back to normal processing.",
+                str(e),
             )
             file.seek(0)  # Reset file pointer just in case
 
@@ -833,13 +993,12 @@ def _extract_text_and_images(
                 text_content=text_content, embedded_images=images, metadata=pdf_metadata
             )
 
-        # For PPTX, XLSX, EML, etc., we do not show embedded image logic here.
-        # You can do something similar to docx if needed.
         if extension == ".pptx":
+            text_content, images = read_pptx_file(
+                file, file_name, extract_images=True, image_callback=image_callback
+            )
             return ExtractionResult(
-                text_content=pptx_to_text(file, file_name=file_name),
-                embedded_images=[],
-                metadata={},
+                text_content=text_content, embedded_images=images, metadata={}
             )
 
         if extension == ".xlsx":
@@ -875,7 +1034,7 @@ def _extract_text_and_images(
         return ExtractionResult(text_content="", embedded_images=[], metadata={})
 
     except Exception as e:
-        logger.exception(f"Failed to extract text/images from {file_name}: {e}")
+        logger.exception("Failed to extract text/images from %s: %s", file_name, e)
         return ExtractionResult(text_content="", embedded_images=[], metadata={})
 
 

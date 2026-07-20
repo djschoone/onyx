@@ -141,6 +141,7 @@ export interface GuruCredentialJson {
 export interface GongCredentialJson {
   gong_access_key: string;
   gong_access_key_secret: string;
+  gong_base_url: string | null;
 }
 
 export interface LoopioCredentialJson {
@@ -252,6 +253,10 @@ export interface FirefliesCredentialJson {
   fireflies_api_key: string;
 }
 
+export interface BraintrustCredentialJson {
+  braintrust_api_key: string;
+}
+
 export interface MediaWikiCredentialJson {}
 export interface WikipediaCredentialJson extends MediaWikiCredentialJson {}
 
@@ -321,6 +326,7 @@ export const credentialTemplates: Record<ValidSources, any> = {
   gong: {
     gong_access_key: "",
     gong_access_key_secret: "",
+    gong_base_url: null,
   } as GongCredentialJson,
   zulip: { zuliprc_content: "" } as ZulipCredentialJson,
   linear: { linear_access_token: "" } as LinearCredentialJson,
@@ -452,6 +458,9 @@ export const credentialTemplates: Record<ValidSources, any> = {
   fireflies: {
     fireflies_api_key: "",
   } as FirefliesCredentialJson,
+  braintrust: {
+    braintrust_api_key: "",
+  } as BraintrustCredentialJson,
   egnyte: {
     domain: "",
     access_token: "",
@@ -556,6 +565,8 @@ export const credentialDisplayNames: Record<string, string> = {
   // Gong
   gong_access_key: "Gong Access Key",
   gong_access_key_secret: "Gong Access Key Secret",
+  gong_base_url:
+    "Gong API Base URL (optional; set your region-specific host like https://<region>.api.gong.io for non-US data residency)",
 
   // Loopio
   loopio_subdomain: "Loopio Subdomain",
@@ -649,6 +660,9 @@ export const credentialDisplayNames: Record<string, string> = {
 
   // Fireflies
   fireflies_api_key: "Fireflies API Key",
+
+  // Braintrust
+  braintrust_api_key: "Braintrust API Key",
 
   // GitBook
   gitbook_space_id: "GitBook Space ID",

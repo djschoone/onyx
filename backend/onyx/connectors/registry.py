@@ -216,6 +216,10 @@ CONNECTOR_CLASS_MAP = {
         module_path="onyx.connectors.testrail.connector",
         class_name="TestRailConnector",
     ),
+    DocumentSource.BRAINTRUST: ConnectorMapping(
+        module_path="onyx.connectors.braintrust.connector",
+        class_name="BraintrustConnector",
+    ),
     DocumentSource.OSTICKET: ConnectorMapping(
         module_path="onyx.connectors.osticket.connector",
         class_name="OsTicketConnector",

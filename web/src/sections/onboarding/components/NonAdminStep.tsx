@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useEffect } from "react";
 import Text from "@/refresh-components/texts/Text";
-import InputTypeIn from "@/refresh-components/inputs/InputTypeIn";
+import { InputTypeIn } from "@opal/components";
 import { updateUserPersonalization } from "@/lib/userSettings";
 import { useUser } from "@/providers/UserProvider";
 import { toast } from "@/hooks/useToast";
@@ -60,7 +60,7 @@ export default function NonAdminStep() {
     <>
       {showHeader && (
         <div
-          className="flex items-center justify-between w-full min-h-11 py-1 pl-3 pr-2 bg-background-tint-00 rounded-16 shadow-01 mb-2"
+          className="flex items-center justify-between w-full min-h-11 py-1 pl-3 pr-2 bg-background-tint-00 rounded-16 shadow-box-01 mb-2"
           aria-label="non-admin-confirmation"
         >
           <ContentAction
@@ -115,7 +115,6 @@ export default function NonAdminStep() {
                       handleSave();
                     }
                   }}
-                  className="w-[26%] min-w-40"
                 />
                 <Button disabled={name === ""} onClick={handleSave}>
                   Save

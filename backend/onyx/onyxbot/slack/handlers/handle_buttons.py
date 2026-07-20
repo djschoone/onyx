@@ -184,6 +184,7 @@ def handle_generate_answer_button(
             client=client.web_client,
             channel=channel_id,
             logger=logger,
+            db_session=db_session,
             feedback_reminder_id=None,
         )
 
@@ -239,7 +240,7 @@ def handle_publish_ephemeral_message_button(
                 chat_message_id, None, db_session
             )  # is this good idea?
         except Exception as e:
-            logger.error(f"Failed to get chat message: {e}")
+            logger.error("Failed to get chat message: %s", e)
             raise e
 
         chat_message_detail = translate_db_message_to_chat_message_detail(chat_message)
@@ -277,7 +278,7 @@ def handle_publish_ephemeral_message_button(
                 delete_original=True,
             )
         except Exception as e:
-            logger.error(f"Failed to send webhook: {e}")
+            logger.error("Failed to send webhook: %s", e)
 
         # remove handling of empheremal block and add AI feedback.
         all_blocks = build_slack_response_blocks(
@@ -303,7 +304,7 @@ def handle_publish_ephemeral_message_button(
                 send_as_ephemeral=False,
             )
         except Exception as e:
-            logger.error(f"Failed to publish ephemeral message: {e}")
+            logger.error("Failed to publish ephemeral message: %s", e)
             raise e
 
     elif action_id == KEEP_TO_YOURSELF_ACTION_ID:
@@ -354,7 +355,7 @@ def handle_publish_ephemeral_message_button(
                     delete_original=False,
                 )
         except Exception as e:
-            logger.error(f"Failed to send webhook: {e}")
+            logger.error("Failed to send webhook: %s", e)
 
 
 def handle_slack_feedback(
@@ -413,7 +414,7 @@ def handle_slack_feedback(
                 feedback=feedback,
             )
         else:
-            logger.error(f"Feedback type '{feedback_type}' not supported")
+            logger.error("Feedback type '%s' not supported", feedback_type)
 
     if get_feedback_visibility() == FeedbackVisibility.PRIVATE or feedback_type not in [
         LIKE_BLOCK_ACTION_ID,

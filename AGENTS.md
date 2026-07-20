@@ -4,8 +4,8 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## KEY NOTES
 
-- If you run into any missing python dependency errors, try running your command with `source .venv/bin/activate` \
-  to assume the python venv.
+- Python deps live in a `uv`-managed virtualenv at `.venv` (repo root). If it doesn't exist yet, create it \
+  with `uv sync --frozen`, then `source .venv/bin/activate`.
 - To make tests work, check the `.env` file at the root of the project to find an OpenAI key.
 - If using `playwright` to explore the frontend, you can usually log in with username `a@example.com` and password
   `a`. The app can be accessed at `http://localhost:3000`.
@@ -62,27 +62,20 @@ Onyx uses Celery for asynchronous task processing with multiple specialized work
    - Tasks: connector pruning, document permissions sync, external group sync, CSV generation
    - Runs with 4 threads concurrency
 
-6. **KG Processing Worker** (`kg_processing`)
-
-   - Handles Knowledge Graph processing and clustering
-   - Builds relationships between documents
-   - Runs clustering algorithms
-   - Configurable concurrency
-
-7. **Monitoring Worker** (`monitoring`)
+6. **Monitoring Worker** (`monitoring`)
 
    - System health monitoring and metrics collection
    - Monitors Celery queues, process memory, and system status
    - Single thread (monitoring doesn't need parallelism)
    - Cloud-specific monitoring tasks
 
-8. **User File Processing Worker** (`user_file_processing`)
+7. **User File Processing Worker** (`user_file_processing`)
 
    - Processes user-uploaded files
    - Handles user file indexing and project synchronization
    - Configurable concurrency
 
-9. **Beat Worker** (`beat`)
+8. **Beat Worker** (`beat`)
    - Celery's scheduler for periodic tasks
    - Uses DynamicTenantScheduler for multi-tenant support
    - Schedules tasks like:
@@ -90,7 +83,6 @@ Onyx uses Celery for asynchronous task processing with multiple specialized work
      - Connector deletion checks (every 20 seconds)
      - Vespa sync checks (every 20 seconds)
      - Pruning checks (every 20 seconds)
-     - KG processing (every 60 seconds)
      - Monitoring tasks (every 5 minutes)
      - Cleanup tasks (hourly)
 
@@ -139,11 +131,14 @@ pre-commit run --all-files
 
 NOTE: Always make sure everything is strictly typed (both in Python and Typescript).
 
+NOTE: Keep comments brief and focused on information that stays relevant long-term. Don't write
+comments that only describe the instantaneous change (e.g. what was just added/removed/refactored).
+
 ## Architecture Overview
 
 ### Technology Stack
 
-- **Backend**: Python 3.11, FastAPI, SQLAlchemy, Alembic, Celery
+- **Backend**: Python 3.13, FastAPI, SQLAlchemy, Alembic, Celery
 - **Frontend**: Next.js 15+, React 18, TypeScript, Tailwind CSS
 - **Database**: PostgreSQL with Redis caching
 - **Search**: Vespa vector database
@@ -177,6 +172,11 @@ web/
 
 Frontend standards for the `web/` and `desktop/` projects live in `web/AGENTS.md`.
 
+Standards for the **mobile** app (React Native + Expo) live in `mobile/AGENTS.md`. Mobile differs
+from web on several points (no DOM, NativeWind instead of web Tailwind — e.g. spacing classes are
+pixel-valued, not web's rem step scale — expo-router, RN primitives), so do **not** assume the web
+rules apply when working in `mobile/`.
+
 ## Database & Migrations
 
 ### Running Migrations
@@ -203,9 +203,17 @@ Write the migration manually and place it in the file that alembic creates when 
 
 ## Testing Strategy
 
-First, you must activate the virtual environment with `source .venv/bin/activate`.
+First, activate the virtualenv: `source .venv/bin/activate`. If `.venv` doesn't exist yet, create it first with `uv sync --frozen`.
 
 There are 4 main types of tests within Onyx:
+
+### Model choice for tests that make real LLM calls
+
+When a test makes a real LLM call (e.g. External Dependency Unit / integration tests
+that hit a live provider), use the cheap-and-fast tier for each provider:
+
+- **OpenAI**: `gpt-5-mini` (never `gpt-4o` / `gpt-4o-mini`)
+- **Anthropic**: `claude-haiku-4-5`
 
 ### Unit Tests
 
@@ -272,7 +280,7 @@ Tests are located at `web/tests/e2e`. Tests are written in TypeScript.
 To run them:
 
 ```bash
-npx playwright test <TEST_NAME>
+bunx playwright test <TEST_NAME>
 ```
 
 For shared fixtures, best practices, and detailed guidance, see `backend/tests/README.md`.
