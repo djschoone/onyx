@@ -187,23 +187,47 @@ git status
 
 ### Rebuild / restart containers
 
-From `~/danswer/deployment/docker_compose` (adjust compose files to whatever you actually use, e.g. dmedia GPU/limits overlays):
+From v4.3 onward, use **upstream `docker-compose.yml` + thin dmedia overrides** (GPU + limits).  
+Do **not** use the old full-copy `docker-compose.dmedia-gpu.yml` that still had Vespa.
 
 ```bash
 cd ~/danswer/deployment/docker_compose
-# Prefer rebuilding images from the checked-out source if you deploy from git, not from docker hub tags:
-docker compose -f docker-compose.yml -f <your-dmedia-override.yml> build
-docker compose -f docker-compose.yml -f <your-dmedia-override.yml> up -d
-docker compose ps
+
+# Fixed tag recommended (avoid bare `latest` for the osTicket fork)
+sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=dmedia-osticket-vX.Y.Z/' .env
+grep '^IMAGE_TAG=\|^AUTH_TYPE=\|^OPENSEARCH_ADMIN_PASSWORD=' .env
+
+docker compose -p danswer-stack \
+  -f docker-compose.yml \
+  -f docker-compose.dmedia-gpu.yml \
+  -f docker-compose.dmedia-limits.yml \
+  build
+
+docker compose -p danswer-stack \
+  -f docker-compose.yml \
+  -f docker-compose.dmedia-gpu.yml \
+  -f docker-compose.dmedia-limits.yml \
+  up -d
+
+docker compose -p danswer-stack \
+  -f docker-compose.yml \
+  -f docker-compose.dmedia-gpu.yml \
+  -f docker-compose.dmedia-limits.yml \
+  ps
 ```
 
-If you deploy prebuilt Hub tags instead of building from git, bump `IMAGE_TAG` in `.env` and `docker compose pull && up -d` — but for the osTicket fork you normally **build from this branch**.
+**Search engine:** v3.x used Vespa (`index`); v4.3+ uses OpenSearch. Postgres/chat data in `danswer-stack_*` volumes is kept; the document index must be **re-indexed**.
 
-Preserve untracked local files (do not delete):
+Also verify before `up`:
 
-- `deployment/docker_compose/docker-compose.dmedia-*.yml`
-- `deployment/docker_compose/README.dmedia.md` (if present)
-- `deployment/data/sslcerts/`
+- `AUTH_TYPE` in `.env` (old full dmedia compose defaulted to `disabled`; upstream defaults to `basic`)
+- `COMPOSE_PROFILES=s3-filestore` and `FILE_STORE_BACKEND=s3` (MinIO is profile-gated in v4.3)
+- `OPENSEARCH_ADMIN_PASSWORD` set to a strong value
+- Nginx: prod used host port **3000** + `app.conf.template.dev` — overrides keep port 3000; template is now upstream `app.conf.template`
+- Redis: overrides keep **persistent** Redis + LRU (upstream v4.3 is ephemeral tmpfs by default)
+- Volumes: `dmedia-limits` pins external `danswer-stack_*` volumes so Postgres/MinIO/Redis/model caches survive
+
+If you deploy prebuilt Hub tags instead of building from git, bump `IMAGE_TAG` and `docker compose pull` — but for the osTicket fork you normally **build from this branch**.
 
 ---
 
@@ -223,7 +247,7 @@ Preserve untracked local files (do not delete):
 | Target | Branch | Notes |
 | --- | --- | --- |
 | v3.3.0 | `dmedia-osticket-upgrade-v3.3.0` | First recorded merge of osTicket onto v3.3 |
-| v4.3.9 | `dmedia-osticket-upgrade-v4.3.9` | Large jump v3.3 → v4.3; keep osTicket + take upstream elsewhere |
+| v4.3.9 | `dmedia-osticket-upgrade-v4.3.9` | Large jump v3.3 → v4.3; Vespa→OpenSearch; dmedia compose becomes thin overrides |
 
 Add a row here after each successful production upgrade.
 
@@ -248,6 +272,15 @@ git fetch myfork
 git checkout "dmedia-osticket-upgrade-${NEW#v}"
 git reset --hard "myfork/dmedia-osticket-upgrade-${NEW#v}"
 cd deployment/docker_compose
-docker compose -f docker-compose.yml -f <dmedia-override.yml> build
-docker compose -f docker-compose.yml -f <dmedia-override.yml> up -d
+# set IMAGE_TAG=dmedia-osticket-X.Y.Z in .env
+docker compose -p danswer-stack \
+  -f docker-compose.yml \
+  -f docker-compose.dmedia-gpu.yml \
+  -f docker-compose.dmedia-limits.yml \
+  build
+docker compose -p danswer-stack \
+  -f docker-compose.yml \
+  -f docker-compose.dmedia-gpu.yml \
+  -f docker-compose.dmedia-limits.yml \
+  up -d
 ```

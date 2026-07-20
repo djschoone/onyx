@@ -1,0 +1,28 @@
+# Dmedia GPU override (thin).
+# Requires nvidia-container-toolkit on the host.
+#
+# Usage (retrogres):
+#   docker compose -p danswer-stack \
+#     -f docker-compose.yml \
+#     -f docker-compose.dmedia-gpu.yml \
+#     -f docker-compose.dmedia-limits.yml \
+#     up -d
+
+services:
+  inference_model_server:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  indexing_model_server:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

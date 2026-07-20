@@ -1,0 +1,118 @@
+# Dmedia resource / volume / security overrides for retrogres.
+#
+# Preserved from the previous full dmedia-gpu compose (v3.3 / Vespa era):
+# - CPU/memory/pids limits
+# - External named volumes under project danswer-stack_*
+# - Persistent Redis (upstream v4.3 defaults to ephemeral tmpfs)
+# - No published ports for postgres/redis/minio
+# - Nginx only on host port 3000 (not 80)
+#
+# Usage:
+#   docker compose -p danswer-stack \
+#     -f docker-compose.yml \
+#     -f docker-compose.dmedia-gpu.yml \
+#     -f docker-compose.dmedia-limits.yml \
+#     up -d
+
+services:
+  api_server:
+    cpus: "1.5"
+    mem_limit: 2g
+    pids_limit: 256
+
+  background:
+    cpus: "2.0"
+    mem_limit: 4g
+    pids_limit: 256
+
+  web_server:
+    cpus: "0.75"
+    mem_limit: 1g
+    pids_limit: 128
+
+  inference_model_server:
+    cpus: "1.0"
+    mem_limit: 2g
+    pids_limit: 128
+
+  indexing_model_server:
+    cpus: "1.5"
+    mem_limit: 3g
+    pids_limit: 128
+
+  # Replaces old Vespa `index` budget (3 CPU / 8g).
+  opensearch:
+    cpus: "3.0"
+    mem_limit: 8g
+    pids_limit: 2048
+
+  relational_db:
+    cpus: "1.0"
+    mem_limit: 2g
+    pids_limit: 128
+    shm_size: 1g
+    ports: !override []
+
+  # Upstream v4.3 uses ephemeral Redis (tmpfs). Keep retrogres persistence + LRU.
+  cache:
+    cpus: "0.5"
+    mem_limit: 2g
+    pids_limit: 64
+    ports: !override []
+    tmpfs: !override []
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 1536mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+
+  minio:
+    cpus: "1.0"
+    mem_limit: 2g
+    pids_limit: 128
+    ports: !override []
+
+  nginx:
+    cpus: "0.5"
+    mem_limit: 256m
+    pids_limit: 64
+    # Prod previously published only 3000 (80 was commented out).
+    ports: !override
+      - "3000:80"
+
+  code-interpreter:
+    cpus: "1.0"
+    mem_limit: 2g
+    pids_limit: 128
+
+volumes:
+  db_volume:
+    external: true
+    name: danswer-stack_db_volume
+  minio_data:
+    external: true
+    name: danswer-stack_minio_data
+  redis_data:
+    external: true
+    name: danswer-stack_redis_data
+  model_cache_huggingface:
+    external: true
+    name: danswer-stack_model_cache_huggingface
+  indexing_huggingface_model_cache:
+    external: true
+    name: danswer-stack_indexing_huggingface_model_cache
+  api_server_logs:
+    external: true
+    name: danswer-stack_api_server_logs
+  background_logs:
+    external: true
+    name: danswer-stack_background_logs
+  inference_model_server_logs:
+    external: true
+    name: danswer-stack_inference_model_server_logs
+  indexing_model_server_logs:
+    external: true
+    name: danswer-stack_indexing_model_server_logs
+  # New in v4.3 — created on first up if missing.
+  opensearch-data:
+    name: danswer-stack_opensearch-data
+  file-system:
+    name: danswer-stack_file-system
