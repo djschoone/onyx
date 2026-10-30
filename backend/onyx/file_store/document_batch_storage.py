@@ -1,20 +1,14 @@
 import json
-from abc import ABC
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from enum import Enum
 from io import StringIO
-from typing import List
-from typing import Optional
-from typing import TypeAlias
+from typing import List, Optional, TypeAlias
 
 from pydantic import BaseModel
 
 from onyx.configs.constants import FileOrigin
-from onyx.connectors.models import DocExtractionContext
-from onyx.connectors.models import DocIndexingContext
-from onyx.connectors.models import Document
-from onyx.file_store.file_store import FileStore
-from onyx.file_store.file_store import get_default_file_store
+from onyx.connectors.models import DocExtractionContext, DocIndexingContext, Document
+from onyx.file_store.file_store import FileStore, get_default_file_store
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -86,12 +80,12 @@ class DocumentBatchStorage(ABC):
         """Get all IDs of batches stored in the file store."""
 
     @abstractmethod
-    def update_old_batches_to_new_index_attempt(self, batch_names: list[str]) -> None:
-        """Update all batches to the new index attempt."""
-        """
-        This is used when we need to re-issue docprocessing tasks for a new index attempt.
-        We need to update the batch file names to the new index attempt ID.
-        """
+    def update_old_batches_to_new_index_attempt(
+        self, batch_names: list[str]
+    ) -> list[str]:
+        """Move the given batches to this index attempt, so docprocessing tasks
+        of this attempt can re-issue them. Returns the new names of the batches
+        it moved. A batch deleted before its move is left out."""
 
     @abstractmethod
     def extract_path_info(self, path: str) -> BatchStoragePathInfo | None:
@@ -173,6 +167,14 @@ class FileStoreDocumentBatchStorage(DocumentBatchStorage):
     def store_batch(self, batch_num: int, documents: list[Document]) -> None:
         """Store a batch of documents using FileStore."""
         file_name = self._get_batch_file_name(batch_num)
+        # An overwrite would repoint a re-issued batch's record at this batch
+        # and lose its documents.
+        if self.file_store.has_file(
+            file_id=file_name,
+            file_origin=FileOrigin.OTHER,
+            file_type="application/json",
+        ):
+            raise RuntimeError(f"Batch {file_name} already exists")
         try:
             data = self._serialize_documents(documents)
             content = StringIO(data)
@@ -255,12 +257,14 @@ class FileStoreDocumentBatchStorage(DocumentBatchStorage):
         return [
             file.file_id
             for file in self.file_store.list_files_by_prefix(
-                self._per_cc_pair_base_path()
+                f"{self._per_cc_pair_base_path()}/"
             )
         ]
 
-    def update_old_batches_to_new_index_attempt(self, batch_names: list[str]) -> None:
-        """Update all batches to the new index attempt."""
+    def update_old_batches_to_new_index_attempt(
+        self, batch_names: list[str]
+    ) -> list[str]:
+        moved_batch_names: list[str] = []
         for batch_file_name in batch_names:
             path_info = self.extract_path_info(batch_file_name)
             if path_info is None:
@@ -268,8 +272,20 @@ class FileStoreDocumentBatchStorage(DocumentBatchStorage):
                     "Could not extract path info from batch file: %s", batch_file_name
                 )
                 continue
+            if path_info.cc_pair_id != self.cc_pair_id:
+                logger.warning(
+                    "Skipping batch file %s owned by cc_pair %s",
+                    batch_file_name,
+                    path_info.cc_pair_id,
+                )
+                continue
             new_batch_file_name = self._get_batch_file_name(path_info.batch_num)
-            self.file_store.change_file_id(batch_file_name, new_batch_file_name)
+            # The old attempt's task deleted the batch after processing it.
+            if not self.file_store.change_file_id(batch_file_name, new_batch_file_name):
+                logger.info("Batch %s was deleted before its move", batch_file_name)
+                continue
+            moved_batch_names.append(new_batch_file_name)
+        return moved_batch_names
 
     def extract_path_info(self, path: str) -> BatchStoragePathInfo | None:
         """Extract path info from a path."""

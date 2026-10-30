@@ -2,12 +2,10 @@
 
 from collections.abc import Sequence
 
-from onyx.llm.interfaces import LanguageModelInput
-from onyx.llm.models import ChatCompletionMessage
+from onyx.llm.model_request import ChatCompletionMessage
 from onyx.llm.prompt_cache.models import CacheMetadata
 from onyx.llm.prompt_cache.providers.base import PromptCacheProvider
 from onyx.llm.prompt_cache.utils import prepare_messages_with_cacheable_transform
-from onyx.llm.prompt_cache.utils import revalidate_message_from_original
 
 
 def _add_anthropic_cache_control(
@@ -21,10 +19,8 @@ def _add_anthropic_cache_control(
     Returns:
         Messages with cache_control added
     """
-    last_message_dict = dict(messages[-1])
-    last_message_dict["cache_control"] = {"type": "ephemeral"}
-    last_message = revalidate_message_from_original(
-        original=messages[-1], mutated=last_message_dict
+    last_message = messages[-1].model_copy(
+        update={"cache_control": {"type": "ephemeral"}}
     )
     return list(messages[:-1]) + [last_message]
 
@@ -44,11 +40,11 @@ class AnthropicPromptCacheProvider(PromptCacheProvider):
 
     def prepare_messages_for_caching(
         self,
-        cacheable_prefix: LanguageModelInput | None,
-        suffix: LanguageModelInput,
+        cacheable_prefix: list[ChatCompletionMessage] | None,
+        suffix: list[ChatCompletionMessage],
         continuation: bool,
         cache_metadata: CacheMetadata | None,  # noqa: ARG002
-    ) -> LanguageModelInput:
+    ) -> list[ChatCompletionMessage]:
         """Prepare messages for Anthropic caching.
 
         Anthropic requires cache_control parameter on cacheable messages.

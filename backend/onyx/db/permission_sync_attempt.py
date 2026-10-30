@@ -4,28 +4,43 @@ This module contains all CRUD operations for both DocPermissionSyncAttempt
 and ExternalGroupPermissionSyncAttempt models, along with shared utilities.
 """
 
-from typing import Any
-from typing import cast
+from datetime import datetime, timedelta
+from typing import Any, cast
 
-from sqlalchemy import delete
-from sqlalchemy import func
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.engine.cursor import CursorResult
-from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from onyx.configs.constants import DocumentSource
 from onyx.db.enums import PermissionSyncStatus
-from onyx.db.models import Connector
-from onyx.db.models import ConnectorCredentialPair
-from onyx.db.models import DocPermissionSyncAttempt
-from onyx.db.models import ExternalGroupPermissionSyncAttempt
+from onyx.db.models import (
+    Connector,
+    ConnectorCredentialPair,
+    DocPermissionSyncAttempt,
+    ExternalGroupPermissionSyncAttempt,
+)
 from onyx.utils.logger import setup_logger
-from onyx.utils.telemetry import optional_telemetry
-from onyx.utils.telemetry import RecordType
+from onyx.utils.telemetry import RecordType, optional_telemetry
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
 
 logger = setup_logger()
+
+# A failed group sync retries after 5 minutes, doubling up to 6 hours.
+_GROUP_SYNC_RETRY_BASE_SECONDS = 5 * 60
+_GROUP_SYNC_RETRY_MAX_SECONDS = 6 * 60 * 60
+# Enough consecutive failures to reach the longest retry delay.
+_GROUP_SYNC_BACKOFF_LOOKBACK = 8
+
+
+def group_sync_retry_delay(failure_count: int) -> timedelta:
+    """The wait before the beat retries a group sync after ``failure_count``
+    (at least 1) consecutive failed attempts."""
+    return timedelta(
+        seconds=min(
+            _GROUP_SYNC_RETRY_BASE_SECONDS * 2 ** (failure_count - 1),
+            _GROUP_SYNC_RETRY_MAX_SECONDS,
+        )
+    )
 
 
 # =============================================================================
@@ -151,6 +166,8 @@ def mark_doc_permission_sync_attempt_failed(
     db_session: Session,
     error_message: str,
     full_exception_trace: str | None = None,
+    total_docs_synced: int = 0,
+    docs_with_permission_errors: int = 0,
 ) -> None:
     """Mark a doc permission sync attempt as failed.
 
@@ -160,6 +177,11 @@ def mark_doc_permission_sync_attempt_failed(
     originates from an ``except`` block, callers should pass
     ``traceback.format_exc()`` so the full stack is persisted alongside
     the short ``error_message``.
+
+    A sync that fails partway through keeps the work it already committed, so
+    callers pass the counts they reached. These assign rather than accumulate:
+    a failure raised after ``complete_doc_permission_sync_attempt`` has already
+    committed would otherwise count the same documents twice.
     """
     try:
         attempt = db_session.execute(
@@ -174,6 +196,8 @@ def mark_doc_permission_sync_attempt_failed(
         attempt.time_finished = func.now()
         attempt.error_message = error_message
         attempt.full_exception_trace = full_exception_trace
+        attempt.total_docs_synced = total_docs_synced
+        attempt.docs_with_permission_errors = docs_with_permission_errors
         db_session.commit()
 
         # Add telemetry for permission sync attempt status change
@@ -332,6 +356,35 @@ def get_recent_external_group_sync_attempts_for_cc_pair(
             )
         ).scalars()
     )
+
+
+def get_external_group_sync_retry_after(
+    cc_pair_id: int,
+    db_session: Session,
+) -> datetime | None:
+    """The time before which the beat must not start the pair's group sync
+    again, from its consecutive FAILED attempts. None when the latest finished
+    attempt did not fail. A manual sync ignores this, and its success clears
+    it."""
+    attempts = get_recent_external_group_sync_attempts_for_cc_pair(
+        cc_pair_id=cc_pair_id,
+        limit=_GROUP_SYNC_BACKOFF_LOOKBACK,
+        db_session=db_session,
+    )
+    failure_count = 0
+    last_failed_at: datetime | None = None
+    for attempt in attempts:
+        if not attempt.status.is_terminal():
+            continue
+        if attempt.status != PermissionSyncStatus.FAILED:
+            break
+        failure_count += 1
+        if last_failed_at is None:
+            last_failed_at = attempt.time_finished or attempt.time_created
+
+    if last_failed_at is None:
+        return None
+    return last_failed_at + group_sync_retry_delay(failure_count)
 
 
 def get_relevant_external_group_sync_attempts_for_cc_pair(

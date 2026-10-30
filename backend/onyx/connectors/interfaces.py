@@ -1,21 +1,18 @@
 import abc
-from collections.abc import Generator
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from types import TracebackType
-from typing import Any
-from typing import Generic
-from typing import TypeAlias
-from typing import TypeVar
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.models import ConnectorCheckpoint
-from onyx.connectors.models import ConnectorFailure
-from onyx.connectors.models import Document
-from onyx.connectors.models import HierarchyNode
-from onyx.connectors.models import SlimDocument
+from onyx.connectors.models import (
+    ConnectorCheckpoint,
+    ConnectorFailure,
+    Document,
+    HierarchyNode,
+    SlimDocument,
+)
 from onyx.file_store.staging import RawFileCallback
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.variable_functionality import fetch_ee_implementation_or_noop
@@ -66,7 +63,7 @@ class BaseConnector(abc.ABC, Generic[CT]):
             if isinstance(metadata_value, str):
                 metadata_lines.append(f"{metadata_key}: {metadata_value}")
             elif isinstance(metadata_value, list):
-                if not all([isinstance(val, str) for val in metadata_value]):
+                if not all(isinstance(val, str) for val in metadata_value):
                     raise RuntimeError(custom_parser_req_msg)
                 metadata_lines.append(f"{metadata_key}: {', '.join(metadata_value)}")
             else:
@@ -161,9 +158,16 @@ class SlimConnectorWithPermSync(BaseConnector):
 
 
 class OAuthConnector(BaseConnector):
+    supports_pkce: ClassVar[bool] = False
+    supports_manual_credentials: ClassVar[bool] = False
+
     class AdditionalOauthKwargs(BaseModel):
         # if overridden, all fields should be str type
         pass
+
+    @classmethod
+    def oauth_enabled(cls) -> bool:
+        return True
 
     @classmethod
     @abc.abstractmethod
@@ -177,6 +181,7 @@ class OAuthConnector(BaseConnector):
         base_domain: str,
         state: str,
         additional_kwargs: dict[str, str],
+        code_challenge: str | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -187,6 +192,7 @@ class OAuthConnector(BaseConnector):
         base_domain: str,
         code: str,
         additional_kwargs: dict[str, str],
+        code_verifier: str | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 

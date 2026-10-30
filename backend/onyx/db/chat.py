@@ -1,42 +1,34 @@
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from uuid import UUID
 
-from fastapi import HTTPException
-from sqlalchemy import delete
-from sqlalchemy import desc
-from sqlalchemy import func
-from sqlalchemy import nullsfirst
-from sqlalchemy import or_
-from sqlalchemy import Row
-from sqlalchemy import select
-from sqlalchemy import update
+from sqlalchemy import Row, delete, desc, func, nullsfirst, or_, select, update
 from sqlalchemy.exc import MultipleResultsFound
-from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import selectinload
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.sql.expression import ColumnElement
 
 from onyx.configs.chat_configs import HARD_DELETE_CHATS
-from onyx.configs.constants import MessageType
-from onyx.context.search.models import InferenceSection
-from onyx.context.search.models import SavedSearchDoc
+from onyx.configs.constants import ANONYMOUS_USER_UUID, MessageType
+from onyx.context.search.models import InferenceSection, SavedSearchDoc
 from onyx.context.search.models import SearchDoc as ServerSearchDoc
-from onyx.db.models import ChatMessage
-from onyx.db.models import ChatMessage__SearchDoc
-from onyx.db.models import ChatSession
-from onyx.db.models import ChatSessionSharedStatus
-from onyx.db.models import Persona
+from onyx.db.enums import IncognitoRecordMode, record_mode_persists_content
+from onyx.db.models import (
+    ChatMessage,
+    ChatMessage__SearchDoc,
+    ChatSession,
+    ChatSessionSharedStatus,
+    Persona,
+    ToolCall,
+    User,
+)
 from onyx.db.models import SearchDoc as DBSearchDoc
-from onyx.db.models import ToolCall
-from onyx.db.models import User
 from onyx.db.persona import get_best_persona_id_for_user
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import FileDescriptor
-from onyx.llm.override_models import LLMOverride
-from onyx.llm.override_models import PromptOverride
+from onyx.llm.override_models import LLMOverride, PromptOverride
 from onyx.server.query_and_chat.models import ChatMessageDetail
 from onyx.utils.logger import setup_logger
 from onyx.utils.postgres_sanitization import sanitize_string
@@ -70,7 +62,12 @@ def get_chat_session_by_id(
         )
 
     if is_shared:
-        stmt = stmt.where(ChatSession.shared_status == ChatSessionSharedStatus.PUBLIC)
+        # Deleting does not unshare, so a shared reader must never see a tombstone.
+        # `include_deleted` is for the owner/admin path only.
+        stmt = stmt.where(
+            ChatSession.shared_status == ChatSessionSharedStatus.PUBLIC,
+            ChatSession.deleted.is_(False),
+        )
     else:
         # if user_id is None, assume this is an admin who should be able
         # to view all chat sessions
@@ -104,25 +101,57 @@ def get_chat_sessions_by_slack_thread_id(
     return db_session.scalars(stmt).all()
 
 
+def get_incognito_session_ids_for_user(
+    user_id: UUID, db_session: Session
+) -> list[UUID]:
+    return list(
+        db_session.scalars(
+            select(ChatSession.id).where(
+                ChatSession.user_id == user_id,
+                ChatSession.incognito_record_mode.is_not(None),
+            )
+        )
+    )
+
+
+def content_persisting_sessions_filter() -> ColumnElement[bool]:
+    """Ordinary chats plus incognito modes that persist content. Content-free
+    sessions have no message content to show on any history surface."""
+    persisting = [m for m in IncognitoRecordMode if m.persists_content]
+    return ChatSession.incognito_record_mode.is_(
+        None
+    ) | ChatSession.incognito_record_mode.in_(persisting)
+
+
 # Retrieves chat sessions by user
 # Chat sessions do not include onyxbot flows
 def get_chat_sessions_by_user(
     user_id: UUID | None,
     deleted: bool | None,
     db_session: Session,
-    include_onyxbot_flows: bool = False,
     limit: int = 50,
     before: datetime | None = None,
     project_id: int | None = None,
     only_non_project_chats: bool = False,
     include_failed_chats: bool = False,
+    exclude_incognito: bool = False,
+    exclude_content_free: bool = False,
 ) -> list[ChatSession]:
-    stmt = select(ChatSession).where(ChatSession.user_id == user_id)
+    stmt = (
+        select(ChatSession)
+        .where(ChatSession.user_id == user_id)
+        .where(ChatSession.onyxbot_flow.is_(False))
+        .order_by(desc(ChatSession.time_updated))
+    )
 
-    if not include_onyxbot_flows:
-        stmt = stmt.where(ChatSession.onyxbot_flow.is_(False))
+    # The two exclusions are independent because the surfaces differ: the owner
+    # sees none of their incognito sessions, while a workspace surface keeps the
+    # full-history ones and drops only those with no content to show.
+    if exclude_incognito:
+        stmt = stmt.where(ChatSession.incognito_record_mode.is_(None))
 
-    stmt = stmt.order_by(desc(ChatSession.time_updated))
+    if exclude_content_free:
+        stmt = stmt.where(content_persisting_sessions_filter())
 
     if deleted is not None:
         stmt = stmt.where(ChatSession.deleted == deleted)
@@ -227,8 +256,13 @@ def create_chat_session(
     onyxbot_flow: bool = False,
     slack_thread_id: str | None = None,
     project_id: int | None = None,
+    incognito_record_mode: IncognitoRecordMode | None = None,
+    session_id: UUID | None = None,
 ) -> ChatSession:
     chat_session = ChatSession(
+        # Caller-supplied only for incognito, where uploads name the session
+        # before it exists so the server can verify them.
+        **({"id": session_id} if session_id is not None else {}),
         user_id=user_id,
         persona_id=persona_id,
         description=description,
@@ -237,6 +271,7 @@ def create_chat_session(
         onyxbot_flow=onyxbot_flow,
         slack_thread_id=slack_thread_id,
         project_id=project_id,
+        incognito_record_mode=incognito_record_mode,
     )
 
     db_session.add(chat_session)
@@ -257,13 +292,26 @@ def duplicate_chat_session_for_user_from_slack(
         (if it is available to the user clicking the button)
     - Sets the user to the given user (if provided)
     """
-    chat_session = get_chat_session_by_id(
-        chat_session_id=chat_session_id,
-        user_id=None,  # Ignore user permissions for this
-        db_session=db_session,
-    )
-    if not chat_session:
-        raise HTTPException(status_code=400, detail="Invalid Chat Session ID provided")
+    try:
+        chat_session = get_chat_session_by_id(
+            chat_session_id=chat_session_id,
+            user_id=None,
+            db_session=db_session,
+        )
+    except ValueError:
+        chat_session = None
+    # Slack answers are owned by the mapped user (DMs, ephemeral replies) or by
+    # the anonymous user (public channel replies). Any other owner is private.
+    if chat_session is None or chat_session.user_id not in (
+        None,
+        user.id,
+        UUID(ANONYMOUS_USER_UUID),
+    ):
+        raise OnyxError(
+            OnyxErrorCode.SESSION_NOT_FOUND, "Invalid Chat Session ID provided"
+        )
+    if chat_session.incognito_record_mode is not None:
+        raise ValueError("Incognito chat sessions cannot be duplicated")
 
     # This enforces permissions and sets a default
     new_persona_id = get_best_persona_id_for_user(
@@ -301,7 +349,12 @@ def update_chat_session(
     if chat_session.deleted:
         raise ValueError("Trying to rename a deleted chat session")
 
-    if description is not None:
+    # A title is conversation-derived, so a content-free session never stores
+    # one. Enforced here rather than at each caller: auto-naming, manual
+    # rename, and the patch endpoint all write through this.
+    if description is not None and record_mode_persists_content(
+        chat_session.incognito_record_mode
+    ):
         chat_session.description = description
     if sharing_status is not None:
         chat_session.shared_status = sharing_status
@@ -486,6 +539,9 @@ def add_chats_to_session_from_slack_thread(
     slack_chat_session_id: UUID,
     new_chat_session_id: UUID,
 ) -> None:
+    source_session = db_session.get(ChatSession, slack_chat_session_id)
+    if source_session and source_session.incognito_record_mode is not None:
+        raise ValueError("Incognito chat sessions cannot be duplicated")
     new_root_message = get_or_create_root_message(
         chat_session_id=new_chat_session_id,
         db_session=db_session,
@@ -962,6 +1018,7 @@ def translate_db_message_to_chat_message_detail(
         latest_child_message=chat_message.latest_child_message_id,
         message=chat_message.message,
         reasoning_tokens=chat_message.reasoning_tokens,
+        request_params=chat_message.request_params,
         message_type=chat_message.message_type,
         context_docs=top_documents,
         citations=converted_citations,

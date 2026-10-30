@@ -2,9 +2,7 @@ import logging
 
 from celery import current_task
 
-from onyx.utils.logger import ColoredFormatter
-from onyx.utils.logger import get_json_formatter
-from onyx.utils.logger import PlainFormatter
+from onyx.utils.logger import ColoredFormatter, PlainFormatter, get_json_formatter
 
 
 class CeleryTaskJsonFormatter(logging.Formatter):
@@ -26,6 +24,8 @@ class CeleryTaskPlainFormatter(PlainFormatter):
     def format(self, record: logging.LogRecord) -> str:
         task = current_task
         if task and task.request:
+            # Prefix a copy: the same record reaches several handlers.
+            record = logging.makeLogRecord(record.__dict__)
             record.__dict__.update(task_id=task.request.id, task_name=task.name)
             record.msg = f"[{task.name}({task.request.id})] {record.msg}"
 
@@ -36,6 +36,8 @@ class CeleryTaskColoredFormatter(ColoredFormatter):
     def format(self, record: logging.LogRecord) -> str:
         task = current_task
         if task and task.request:
+            # Prefix a copy: the same record reaches several handlers.
+            record = logging.makeLogRecord(record.__dict__)
             record.__dict__.update(task_id=task.request.id, task_name=task.name)
             record.msg = f"[{task.name}({task.request.id})] {record.msg}"
 

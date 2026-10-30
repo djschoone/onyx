@@ -3,17 +3,11 @@ import json
 import os
 import sys
 import threading
-from collections.abc import Callable
-from collections.abc import Generator
-from collections.abc import Iterator
+from collections.abc import Callable, Generator, Iterator
 from datetime import datetime
 from enum import Enum
-from typing import Any
-from typing import cast
-from typing import Protocol
-from urllib.parse import parse_qs
-from urllib.parse import ParseResult
-from urllib.parse import urlparse
+from typing import Any, Protocol, cast
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials as OAuthCredentials
@@ -22,84 +16,96 @@ from googleapiclient.errors import HttpError
 from typing_extensions import override
 
 from onyx.access.models import ExternalAccess
-from onyx.configs.app_configs import GOOGLE_DRIVE_CONNECTOR_SIZE_THRESHOLD
-from onyx.configs.app_configs import INDEX_BATCH_SIZE
-from onyx.configs.app_configs import MAX_DRIVE_WORKERS
+from onyx.configs.app_configs import (
+    GOOGLE_DRIVE_CONNECTOR_SIZE_THRESHOLD,
+    INDEX_BATCH_SIZE,
+    MAX_DRIVE_WORKERS,
+)
 from onyx.configs.constants import DocumentSource
-from onyx.connectors.exceptions import ConnectorValidationError
-from onyx.connectors.exceptions import CredentialExpiredError
-from onyx.connectors.exceptions import InsufficientPermissionsError
+from onyx.connectors.exceptions import (
+    ConnectorValidationError,
+    CredentialExpiredError,
+    InsufficientPermissionsError,
+)
 from onyx.connectors.google_drive.doc_conversion import (
     _FALLBACK_BINARY_WEB_VIEW_LINK_TEMPLATE,
-)
-from onyx.connectors.google_drive.doc_conversion import (
     _FALLBACK_WEB_VIEW_LINK_TEMPLATES,
+    WEB_VIEW_LINK_KEY,
+    PermissionSyncContext,
+    build_slim_document,
+    convert_drive_item_to_document,
+    onyx_document_id_from_drive_file,
 )
-from onyx.connectors.google_drive.doc_conversion import build_slim_document
-from onyx.connectors.google_drive.doc_conversion import convert_drive_item_to_document
-from onyx.connectors.google_drive.doc_conversion import onyx_document_id_from_drive_file
-from onyx.connectors.google_drive.doc_conversion import PermissionSyncContext
-from onyx.connectors.google_drive.doc_conversion import WEB_VIEW_LINK_KEY
-from onyx.connectors.google_drive.file_retrieval import crawl_folders_for_files
-from onyx.connectors.google_drive.file_retrieval import DriveFileFieldType
-from onyx.connectors.google_drive.file_retrieval import get_all_files_for_oauth
 from onyx.connectors.google_drive.file_retrieval import (
+    DriveFileFieldType,
+    crawl_folders_for_files,
+    get_all_files_for_oauth,
     get_all_files_in_my_drive_and_shared,
-)
-from onyx.connectors.google_drive.file_retrieval import get_external_access_for_folder
-from onyx.connectors.google_drive.file_retrieval import (
+    get_external_access_for_folder,
     get_files_by_web_view_links_batch,
+    get_files_in_shared_drive,
+    get_folder_metadata,
+    get_root_folder_id,
+    get_shared_drive_name,
+    has_link_only_permission,
 )
-from onyx.connectors.google_drive.file_retrieval import get_files_in_shared_drive
-from onyx.connectors.google_drive.file_retrieval import get_folder_metadata
-from onyx.connectors.google_drive.file_retrieval import get_root_folder_id
-from onyx.connectors.google_drive.file_retrieval import get_shared_drive_name
-from onyx.connectors.google_drive.file_retrieval import has_link_only_permission
-from onyx.connectors.google_drive.models import DriveRetrievalStage
-from onyx.connectors.google_drive.models import GoogleDriveCheckpoint
-from onyx.connectors.google_drive.models import GoogleDriveFileType
-from onyx.connectors.google_drive.models import RetrievedDriveFile
-from onyx.connectors.google_drive.models import StageCompletion
+from onyx.connectors.google_drive.models import (
+    DriveRetrievalStage,
+    GoogleDriveCheckpoint,
+    GoogleDriveFileType,
+    RetrievedDriveFile,
+    StageCompletion,
+)
 from onyx.connectors.google_utils.google_auth import get_google_creds
-from onyx.connectors.google_utils.google_utils import execute_paginated_retrieval
-from onyx.connectors.google_utils.google_utils import get_file_owners
-from onyx.connectors.google_utils.google_utils import GoogleFields
-from onyx.connectors.google_utils.resources import get_admin_service
-from onyx.connectors.google_utils.resources import get_drive_service
-from onyx.connectors.google_utils.resources import GoogleDriveService
-from onyx.connectors.google_utils.resources import ImpersonationError
-from onyx.connectors.google_utils.resources import make_user_removal_checker
+from onyx.connectors.google_utils.google_utils import (
+    GoogleFields,
+    execute_paginated_retrieval,
+    get_file_owners,
+)
+from onyx.connectors.google_utils.resources import (
+    GoogleDriveService,
+    ImpersonationError,
+    get_admin_service,
+    get_drive_service,
+    make_user_removal_checker,
+)
 from onyx.connectors.google_utils.shared_constants import (
     DB_CREDENTIALS_PRIMARY_ADMIN_KEY,
+    MISSING_SCOPES_ERROR_STR,
+    ONYX_SCOPE_INSTRUCTIONS,
+    SLIM_BATCH_SIZE,
+    USER_FIELDS,
 )
-from onyx.connectors.google_utils.shared_constants import MISSING_SCOPES_ERROR_STR
-from onyx.connectors.google_utils.shared_constants import ONYX_SCOPE_INSTRUCTIONS
-from onyx.connectors.google_utils.shared_constants import SLIM_BATCH_SIZE
-from onyx.connectors.google_utils.shared_constants import USER_FIELDS
-from onyx.connectors.interfaces import CheckpointedConnectorWithPermSync
-from onyx.connectors.interfaces import CheckpointOutput
-from onyx.connectors.interfaces import GenerateSlimDocumentOutput
-from onyx.connectors.interfaces import NormalizationResult
-from onyx.connectors.interfaces import Resolver
-from onyx.connectors.interfaces import SecondsSinceUnixEpoch
-from onyx.connectors.interfaces import SlimConnector
-from onyx.connectors.interfaces import SlimConnectorWithPermSync
-from onyx.connectors.models import ConnectorFailure
-from onyx.connectors.models import ConnectorMissingCredentialError
-from onyx.connectors.models import Document
-from onyx.connectors.models import DocumentFailure
-from onyx.connectors.models import EntityFailure
-from onyx.connectors.models import HierarchyNode
-from onyx.connectors.models import SlimDocument
+from onyx.connectors.interfaces import (
+    CheckpointedConnectorWithPermSync,
+    CheckpointOutput,
+    GenerateSlimDocumentOutput,
+    NormalizationResult,
+    Resolver,
+    SecondsSinceUnixEpoch,
+    SlimConnector,
+    SlimConnectorWithPermSync,
+)
+from onyx.connectors.models import (
+    ConnectorFailure,
+    ConnectorMissingCredentialError,
+    Document,
+    DocumentFailure,
+    EntityFailure,
+    HierarchyNode,
+    SlimDocument,
+)
 from onyx.db.enums import HierarchyNodeType
 from onyx.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from onyx.utils.batching import batch_generator
 from onyx.utils.logger import setup_logger
 from onyx.utils.retry_wrapper import retry_builder
-from onyx.utils.threadpool_concurrency import parallel_yield
-from onyx.utils.threadpool_concurrency import run_functions_tuples_in_parallel
-from onyx.utils.threadpool_concurrency import ThreadSafeDict
-from onyx.utils.threadpool_concurrency import ThreadSafeSet
+from onyx.utils.threadpool_concurrency import (
+    ThreadSafeDict,
+    ThreadSafeSet,
+    parallel_yield,
+    run_functions_tuples_in_parallel,
+)
 
 logger = setup_logger()
 # TODO: Improve this by using the batch utility: https://googleapis.github.io/google-api-python-client/docs/batch.html
@@ -209,6 +215,15 @@ def _is_shared_drive_root(folder: GoogleDriveFileType) -> bool:
 
     # For shared drive content, the root has id == driveId
     return bool(drive_id and folder_id == drive_id)
+
+
+def _resume_start(
+    completed_until: SecondsSinceUnixEpoch,
+    start: SecondsSinceUnixEpoch | None,
+) -> SecondsSinceUnixEpoch:
+    """Resume from the checkpointed frontier, but never before the configured
+    range start (a corrupted frontier must not widen the requested time range)."""
+    return max(completed_until, start) if start is not None else completed_until
 
 
 def _public_access() -> ExternalAccess:
@@ -396,10 +411,7 @@ class GoogleDriveConnector(
         parsed = urlparse(url)
         netloc = parsed.netloc.lower()
 
-        if not (
-            netloc.startswith("docs.google.com")
-            or netloc.startswith("drive.google.com")
-        ):
+        if not netloc.startswith(("docs.google.com", "drive.google.com")):
             return NormalizationResult(normalized_url=None, use_default=False)
 
         file_id = _extract_drive_file_id(parsed)
@@ -940,7 +952,11 @@ class GoogleDriveConnector(
                         field_type=field_type,
                         include_shared_with_me=self.include_files_shared_with_me,
                         max_num_pages=MY_DRIVE_PAGES_PER_CHECKPOINT,
-                        start=curr_stage.completed_until if resuming else start,
+                        start=(
+                            _resume_start(curr_stage.completed_until, start)
+                            if resuming
+                            else start
+                        ),
                         end=end,
                         cache_folders=not bool(curr_stage.completed_until),
                         page_token=curr_stage.next_page_token,
@@ -989,7 +1005,7 @@ class GoogleDriveConnector(
             if resuming:
                 drive_id = curr_stage.current_folder_or_drive_id
                 if drive_id:
-                    resume_start = curr_stage.completed_until
+                    resume_start = _resume_start(curr_stage.completed_until, start)
                     for file_or_token in _yield_from_drive(drive_id, resume_start):
                         if isinstance(file_or_token, str):
                             checkpoint.completion_map[
@@ -1055,7 +1071,7 @@ class GoogleDriveConnector(
                         user_email,
                     )
                 else:
-                    resume_start = curr_stage.completed_until
+                    resume_start = _resume_start(curr_stage.completed_until, start)
                     yield from _yield_from_folder_crawl(folder_id, resume_start)
                 last_processed_folder = folder_id
 
@@ -1414,16 +1430,18 @@ class GoogleDriveConnector(
             ].current_folder_or_drive_id
             if drive_id is None:
                 raise ValueError("drive id not set in checkpoint")
-            resume_start = checkpoint.completion_map[
-                self.primary_admin_email
-            ].completed_until
+            resume_start = _resume_start(
+                checkpoint.completion_map[self.primary_admin_email].completed_until,
+                start,
+            )
             for file_or_token in _yield_from_drive(drive_id, resume_start):
-                if isinstance(file_or_token, str):
-                    checkpoint.completion_map[
-                        self.primary_admin_email
-                    ].next_page_token = file_or_token
-                    return  # done with the max num pages, return checkpoint
+                # Propagate page tokens so the caller records them and pauses at
+                # this stage. Consuming a token here looks like normal completion
+                # to the caller, which then advances the stage and drops the
+                # remaining pages of the drive.
                 yield file_or_token
+                if isinstance(file_or_token, str):
+                    return  # done with the max num pages, return checkpoint
             checkpoint.completion_map[self.primary_admin_email].next_page_token = None
 
         for drive_id in drive_ids_to_retrieve:
@@ -1437,13 +1455,22 @@ class GoogleDriveConnector(
                 drive_id,
                 self.primary_admin_email,
             )
+            # Record the stage and drive being listed before any file is
+            # yielded (as the service account path does), so a page token
+            # emitted before the first yielded file resumes this drive, not the
+            # previous one. Without the stage, the resume branch above is
+            # skipped and the token leaks into the first unretrieved drive's
+            # fresh listing.
+            checkpoint.completion_map[self.primary_admin_email].update(
+                stage=DriveRetrievalStage.SHARED_DRIVE_FILES,
+                completed_until=0,
+                current_folder_or_drive_id=drive_id,
+            )
             for file_or_token in _yield_from_drive(drive_id, start):
-                if isinstance(file_or_token, str):
-                    checkpoint.completion_map[
-                        self.primary_admin_email
-                    ].next_page_token = file_or_token
-                    return  # done with the max num pages, return checkpoint
+                # See the resume loop above: the caller records page tokens.
                 yield file_or_token
+                if isinstance(file_or_token, str):
+                    return  # done with the max num pages, return checkpoint
             checkpoint.completion_map[self.primary_admin_email].next_page_token = None
 
     def _oauth_retrieval_folders(
@@ -1494,11 +1521,12 @@ class GoogleDriveConnector(
                 self.primary_admin_email
             ].current_folder_or_drive_id
         ):
-            resume_start = checkpoint.completion_map[
-                self.primary_admin_email
-            ].completed_until
+            resume_start = _resume_start(
+                checkpoint.completion_map[self.primary_admin_email].completed_until,
+                start,
+            )
             yield from _yield_from_folder_crawl(
-                folder_id,  # ty: ignore[possibly-unresolved-reference]
+                folder_id,
                 resume_start,
             )
 
@@ -1551,6 +1579,16 @@ class GoogleDriveConnector(
                         file.completion_stage,
                         file.user_email,
                     )
+
+            # Never move the frontier backward within the same stage and
+            # drive/folder: a regression changes the listing query, invalidates
+            # the saved page token, and restarts retrieval from the regressed
+            # timestamp — which can loop forever.
+            if (
+                file.completion_stage == completion.stage
+                and file.parent_id == completion.current_folder_or_drive_id
+            ):
+                completed_until = max(completed_until, completion.completed_until)
 
             completion.update(
                 stage=file.completion_stage,
@@ -1608,7 +1646,7 @@ class GoogleDriveConnector(
             all_files_start = start
             # if resuming from a checkpoint
             if completion.stage == DriveRetrievalStage.OAUTH_FILES:
-                all_files_start = completion.completed_until
+                all_files_start = _resume_start(completion.completed_until, start)
 
             for file_or_token in self._oauth_retrieval_all_files(
                 field_type=field_type,
@@ -2065,14 +2103,18 @@ class GoogleDriveConnector(
             )
 
             # Build slim documents
-            for file in files_batch:
-                if doc := build_slim_document(
-                    self.creds,
-                    file.drive_file,
-                    permission_sync_context,
-                    retriever_email=file.user_email,
-                ):
-                    slim_batch.append(doc)
+            slim_batch.extend(
+                doc
+                for file in files_batch
+                if (
+                    doc := build_slim_document(
+                        self.creds,
+                        file.drive_file,
+                        permission_sync_context,
+                        retriever_email=file.user_email,
+                    )
+                )
+            )
 
             # Combine: hierarchy nodes first, then slim docs
             result: list[SlimDocument | HierarchyNode] = []

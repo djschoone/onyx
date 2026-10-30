@@ -1,6 +1,5 @@
 import os
-from typing import Any
-from typing import List
+from typing import Any, List
 from urllib.parse import urlparse
 
 # Used for logging
@@ -36,6 +35,7 @@ INDEXING_MODEL_SERVER_PORT = int(
 CONNECTOR_CLASSIFIER_MODEL_REPO = "Danswer/filter-extraction-model"
 CONNECTOR_CLASSIFIER_MODEL_TAG = "1.0.0"
 INTENT_MODEL_VERSION = "onyx-dot-app/hybrid-intent-token-classifier"
+DEFAULT_DOCUMENT_ENCODER_MODEL = "nomic-ai/nomic-embed-text-v1"
 # INTENT_MODEL_TAG = "v1.0.3"
 INTENT_MODEL_TAG: str | None = None
 # Bi-Encoder, other details
@@ -78,6 +78,10 @@ DEV_LOGGING_ENABLED = os.environ.get("DEV_LOGGING_ENABLED", "").lower() == "true
 LOG_TO_FILE = os.environ.get("LOG_TO_FILE", "true").lower() != "false"
 # notset, debug, info, notice, warning, error, or critical
 LOG_LEVEL = os.environ.get("LOG_LEVEL") or "info"
+# Chatty third-party libraries (LiteLLM, httpcore, botocore, ...) are capped at
+# INFO even when LOG_LEVEL=debug — LiteLLM alone emits several DEBUG records per
+# streamed token. Set LOG_THIRD_PARTY_DEBUG=true to let them log at LOG_LEVEL.
+LOG_THIRD_PARTY_DEBUG = os.environ.get("LOG_THIRD_PARTY_DEBUG", "").lower() == "true"
 
 # Log output format: "plain" (human-readable text, default) or "json" (structured
 # single-line JSON, suitable for container log aggregators). When "json", context
@@ -143,6 +147,8 @@ PRESERVED_SEARCH_FIELDS = [
     "normalize",
     "passage_prefix",
     "query_prefix",
+    # Immutable per settings id; server-controlled, never set via update.
+    "use_port_flow",
 ]
 
 
@@ -187,6 +193,17 @@ CORS_ALLOW_CREDENTIALS: bool = cors_allow_credentials(CORS_ALLOWED_ORIGIN)
 # Multi-tenancy configuration
 MULTI_TENANT = os.environ.get("MULTI_TENANT", "").lower() == "true"
 
+# Air-gapped deployment: no outbound calls to onyx-controlled endpoints
+# (recommended-models sync, remote model catalog lookup). Inbound traffic and
+# user-configured integrations are unaffected.
+ONYX_AIRGAPPED = os.environ.get("ONYX_AIRGAPPED", "").lower() == "true"
+
+# How often to check GitHub for updated onyx-published LLM config
+# (recommended-models, remote model catalog sections).
+AUTO_LLM_UPDATE_INTERVAL_SECONDS = int(
+    os.environ.get("AUTO_LLM_UPDATE_INTERVAL_SECONDS", 1800)  # 30 minutes
+)
+
 # Outside this file, should almost always use `POSTGRES_DEFAULT_SCHEMA` unless you
 # have a very good reason
 POSTGRES_DEFAULT_SCHEMA_STANDARD_VALUE = "public"
@@ -227,9 +244,6 @@ IGNORED_SYNCING_TENANT_LIST = (
     if IGNORED_SYNCING_TENANT_IDS
     else None
 )
-
-ENVIRONMENT = os.environ.get("ENVIRONMENT") or "not_explicitly_set"
-
 
 #####
 # Usage Limits Configuration (meant for cloud, off by default for self-hosted)

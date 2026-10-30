@@ -1,7 +1,6 @@
 """Tests for FileStoreDocumentBatchStorage."""
 
-from unittest.mock import MagicMock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from onyx.file_store.document_batch_storage import FileStoreDocumentBatchStorage
 from onyx.file_store.file_store import S3BackedFileStore
@@ -18,7 +17,7 @@ def _mock_db_session() -> MagicMock:
 
 @patch(f"{_S3_MODULE}.get_session_with_current_tenant")
 @patch(f"{_S3_MODULE}.get_session_with_current_tenant_if_none")
-@patch(f"{_S3_MODULE}.get_filerecord_by_file_id_optional", return_value=None)
+@patch(f"{_S3_MODULE}.get_filerecord_by_file_id_for_update", return_value=None)
 @patch(f"{_S3_MODULE}.get_filerecord_by_prefix")
 def test_cleanup_all_batches_completes_when_files_already_deleted(
     mock_list: MagicMock,

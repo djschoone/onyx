@@ -47,6 +47,33 @@ JIRA_PERMISSION_GROUP_SYNC_FREQUENCY = int(
 
 
 #####
+# Canvas
+#####
+# In seconds, default is 30 minutes
+CANVAS_PERMISSION_DOC_SYNC_FREQUENCY = int(
+    os.environ.get("CANVAS_PERMISSION_DOC_SYNC_FREQUENCY") or 30 * 60
+)
+# In seconds, default is 30 minutes
+CANVAS_PERMISSION_GROUP_SYNC_FREQUENCY = int(
+    os.environ.get("CANVAS_PERMISSION_GROUP_SYNC_FREQUENCY") or 30 * 60
+)
+
+
+#####
+# Box
+#####
+# Aligned with SharePoint (the closest analog: enterprise file storage with
+# folder hierarchy + collaborations): doc sync every 30 minutes, group sync
+# every 5 minutes.
+BOX_PERMISSION_DOC_SYNC_FREQUENCY = int(
+    os.environ.get("BOX_PERMISSION_DOC_SYNC_FREQUENCY") or 30 * 60
+)
+BOX_PERMISSION_GROUP_SYNC_FREQUENCY = int(
+    os.environ.get("BOX_PERMISSION_GROUP_SYNC_FREQUENCY") or 5 * 60
+)
+
+
+#####
 # Google Drive
 #####
 GOOGLE_DRIVE_PERMISSION_GROUP_SYNC_FREQUENCY = int(
@@ -85,6 +112,18 @@ TEAMS_PERMISSION_DOC_SYNC_FREQUENCY = int(
     os.environ.get("TEAMS_PERMISSION_DOC_SYNC_FREQUENCY") or 5 * 60
 )
 
+# In seconds, default is 5 minutes
+TEAMS_PERMISSION_GROUP_SYNC_FREQUENCY = int(
+    os.environ.get("TEAMS_PERMISSION_GROUP_SYNC_FREQUENCY") or 5 * 60
+)
+
+#####
+# Outlook
+#####
+OUTLOOK_PERMISSION_DOC_SYNC_FREQUENCY = int(
+    os.environ.get("OUTLOOK_PERMISSION_DOC_SYNC_FREQUENCY") or 5 * 60
+)
+
 #####
 # SharePoint
 #####
@@ -96,6 +135,16 @@ SHAREPOINT_PERMISSION_DOC_SYNC_FREQUENCY = int(
 # In seconds, default is 5 minutes
 SHAREPOINT_PERMISSION_GROUP_SYNC_FREQUENCY = int(
     os.environ.get("SHAREPOINT_PERMISSION_GROUP_SYNC_FREQUENCY") or 5 * 60
+)
+
+# In seconds, default is 30 minutes
+ONEDRIVE_PERMISSION_DOC_SYNC_FREQUENCY_S = int(
+    os.environ.get("ONEDRIVE_PERMISSION_DOC_SYNC_FREQUENCY") or 30 * 60
+)
+
+# In seconds, default is 5 minutes
+ONEDRIVE_PERMISSION_GROUP_SYNC_FREQUENCY_S = int(
+    os.environ.get("ONEDRIVE_PERMISSION_GROUP_SYNC_FREQUENCY") or 5 * 60
 )
 
 
@@ -142,4 +191,23 @@ LICENSE_ENFORCEMENT_ENABLED = (
 # Used when MULTI_TENANT=false (self-hosted mode)
 CLOUD_DATA_PLANE_URL = os.environ.get(
     "CLOUD_DATA_PLANE_URL", "https://cloud.onyx.app/api"
+)
+
+# Log export collects pod stdout, pod state, and events through the Kubernetes API
+# when the api_server runs in Kubernetes. Off by default: it needs a service
+# account with read access to pods, which the Helm chart grants only to the
+# api-server when logExport.kubernetes.enabled is set.
+LOG_EXPORT_KUBERNETES_ENABLED = (
+    os.environ.get("LOG_EXPORT_KUBERNETES_ENABLED") or "false"
+).lower() == "true"
+# Most recent lines read from each container log stream.
+LOG_EXPORT_KUBERNETES_TAIL_LINES = int(
+    os.environ.get("LOG_EXPORT_KUBERNETES_TAIL_LINES") or 100_000
+)
+# Byte cap per container log stream, and for all streams in one export.
+LOG_EXPORT_KUBERNETES_MAX_BYTES_PER_STREAM = int(
+    os.environ.get("LOG_EXPORT_KUBERNETES_MAX_BYTES_PER_STREAM") or 25 * 1024 * 1024
+)
+LOG_EXPORT_KUBERNETES_MAX_TOTAL_BYTES = int(
+    os.environ.get("LOG_EXPORT_KUBERNETES_MAX_TOTAL_BYTES") or 500 * 1024 * 1024
 )

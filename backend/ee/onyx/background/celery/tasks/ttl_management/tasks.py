@@ -1,18 +1,18 @@
 import uuid
 
-from celery import shared_task
-from celery import Task
+from celery import Task, shared_task
 
 from ee.onyx.background.celery_utils import should_perform_chat_ttl_check
 from onyx.configs.app_configs import JOB_TIMEOUT
-from onyx.configs.constants import CELERY_CHAT_TTL_DELETE_TASK_EXPIRES
-from onyx.configs.constants import CHAT_TTL_DELETE_BATCH_SIZE
-from onyx.configs.constants import OnyxCeleryPriority
-from onyx.configs.constants import OnyxCeleryQueues
-from onyx.configs.constants import OnyxCeleryTask
-from onyx.configs.constants import OnyxRedisLocks
-from onyx.db.chat import delete_chat_session
-from onyx.db.chat import get_chat_sessions_older_than
+from onyx.configs.constants import (
+    CELERY_CHAT_TTL_DELETE_TASK_EXPIRES,
+    CHAT_TTL_DELETE_BATCH_SIZE,
+    OnyxCeleryPriority,
+    OnyxCeleryQueues,
+    OnyxCeleryTask,
+    OnyxRedisLocks,
+)
+from onyx.db.chat import delete_chat_session, get_chat_sessions_older_than
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.redis.redis_pool import get_redis_client
 from onyx.redis.tenant_redis_client import TenantRedisClient
@@ -51,7 +51,7 @@ def _release_chain_if_owned(redis_client: TenantRedisClient, chain_token: str) -
     )
 
 
-@shared_task(
+@shared_task(  # ty: ignore[invalid-argument-type]
     name=OnyxCeleryTask.PERFORM_TTL_MANAGEMENT_TASK,
     ignore_result=True,
     soft_time_limit=JOB_TIMEOUT,
@@ -144,7 +144,7 @@ def perform_ttl_management_task(
         _release_chain_if_owned(redis_client, chain_token)
 
 
-@shared_task(
+@shared_task(  # ty: ignore[invalid-argument-type]
     name=OnyxCeleryTask.CHECK_TTL_MANAGEMENT_TASK,
     ignore_result=True,
     soft_time_limit=JOB_TIMEOUT,

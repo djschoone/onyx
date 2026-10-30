@@ -1,19 +1,15 @@
-from sqlalchemy import select
-from sqlalchemy import update
-from sqlalchemy.orm import selectinload
-from sqlalchemy.orm import Session
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session, selectinload
 
-from onyx.db.models import ImageGenerationConfig
-from onyx.db.models import LLMProvider
-from onyx.db.models import ModelConfiguration
-from onyx.llm.utils import get_max_input_tokens
+from onyx.db.models import ImageGenerationConfig, LLMProvider, ModelConfiguration
+from onyx.llm.model_capabilities import get_max_input_tokens
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
 
 # Default image generation config constants
-DEFAULT_IMAGE_PROVIDER_ID = "openai_gpt_image_1"
-DEFAULT_IMAGE_MODEL_NAME = "gpt-image-1"
+DEFAULT_IMAGE_PROVIDER_ID = "openai_gpt_image_2_5_flare"
+DEFAULT_IMAGE_MODEL_NAME = "gpt-image-2.5-flare"
 DEFAULT_IMAGE_PROVIDER = "openai"
 
 
@@ -181,8 +177,8 @@ def create_default_image_gen_config_from_api_key(
         db_session: Database session
         api_key: API key for the LLM provider
         provider: Provider name (default: openai)
-        image_provider_id: Static unique key for the config (default: openai_gpt_image_1)
-        model_name: Model name for image generation (default: gpt-image-1)
+        image_provider_id: Static unique key for the config (default: openai_gpt_image_2_5_flare)
+        model_name: Model name for image generation (default: gpt-image-2.5-flare)
 
     Returns:
         The created ImageGenerationConfig, or None if:

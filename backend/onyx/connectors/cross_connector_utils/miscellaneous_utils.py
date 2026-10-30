@@ -1,35 +1,23 @@
 import re
-from collections.abc import Callable
-from collections.abc import Iterator
-from datetime import datetime
-from datetime import timezone
+from collections.abc import Callable, Iterator
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
-from typing import TypeVar
-from urllib.parse import urljoin
-from urllib.parse import urlparse
+from typing import Any, TypeVar
+from urllib.parse import urljoin, urlparse
 
 import requests
 from dateutil.parser import parse
 
 from onyx.configs.app_configs import CONNECTOR_LOCALHOST_OVERRIDE
-from onyx.configs.constants import DocumentSource
-from onyx.configs.constants import IGNORE_FOR_QA
-from onyx.connectors.models import BasicExpertInfo
-from onyx.connectors.models import OnyxMetadata
+from onyx.configs.constants import IGNORE_FOR_QA, DocumentSource
+from onyx.connectors.models import BasicExpertInfo, OnyxMetadata
+from onyx.utils.datetime import datetime_to_utc
 from onyx.utils.logger import setup_logger
 from onyx.utils.text_processing import is_valid_email
 
 T = TypeVar("T")
 U = TypeVar("U")
 logger = setup_logger()
-
-
-def datetime_to_utc(dt: datetime) -> datetime:
-    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    return dt.astimezone(timezone.utc)
 
 
 def time_str_to_utc(datetime_str: str) -> datetime:
@@ -91,6 +79,14 @@ def basic_expert_info_representation(info: BasicExpertInfo) -> str | None:
     return None
 
 
+def experts_from_stores_representations(
+    names: list[str] | None,
+) -> list[BasicExpertInfo] | None:
+    """Inverse of `get_experts_stores_representations`, which returns
+    `display_name` when it is the only field set."""
+    return [BasicExpertInfo(display_name=name) for name in names] if names else None
+
+
 def get_experts_stores_representations(
     experts: list[BasicExpertInfo] | None,
 ) -> list[str] | None:
@@ -149,19 +145,8 @@ def process_onyx_metadata(
     Users may set Onyx metadata and custom tags in text files. https://docs.onyx.app/admins/connectors/official/file
     Any unrecognized fields are treated as custom tags.
     """
-    p_owner_names = metadata.get("primary_owners")
-    p_owners = (
-        [BasicExpertInfo(display_name=name) for name in p_owner_names]
-        if p_owner_names
-        else None
-    )
-
-    s_owner_names = metadata.get("secondary_owners")
-    s_owners = (
-        [BasicExpertInfo(display_name=name) for name in s_owner_names]
-        if s_owner_names
-        else None
-    )
+    p_owners = experts_from_stores_representations(metadata.get("primary_owners"))
+    s_owners = experts_from_stores_representations(metadata.get("secondary_owners"))
     source_type = _parse_document_source(metadata.get("connector_type"))
 
     dt_str = metadata.get("doc_updated_at")

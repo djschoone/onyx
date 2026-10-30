@@ -22,8 +22,7 @@ from uuid import uuid4
 import pytest
 from redis import Redis
 
-from onyx.redis.redis_pool import get_raw_redis_client
-from onyx.redis.redis_pool import redis_pool
+from onyx.redis.redis_pool import get_raw_redis_client, redis_pool
 from onyx.redis.tenant_redis_client import TenantRedisClient
 
 
@@ -132,6 +131,16 @@ class TestRoundTrip:
         tenant_redis.hset(key, "f1", "v1")
         tenant_redis.hset(key, "f2", "v2")
         assert tenant_redis.hmget(key, ["f1", "f2", "missing"]) == [
+            b"v1",
+            b"v2",
+            None,
+        ]
+
+    def test_set_mget(self, tenant_redis: TenantRedisClient) -> None:
+        first, second = _unique_key(), _unique_key()
+        tenant_redis.set(first, "v1")
+        tenant_redis.set(second, "v2")
+        assert tenant_redis.mget([first, second, _unique_key()]) == [
             b"v1",
             b"v2",
             None,
@@ -453,3 +462,19 @@ class TestPipeline:
 
         members = raw_redis.smembers(f"{tenant_id}:{key}")
         assert members == {b"a", b"b", b"c"}
+
+
+def test_renew_if_value_renews_only_the_tenant_key(
+    tenant_redis: TenantRedisClient, tenant_id: str, raw_redis: Redis
+) -> None:
+    key = _unique_key()
+    tenant_redis.set(key, "owner", ex=10)
+    raw_redis.set(key, "owner", ex=10)
+    try:
+        assert not tenant_redis.renew_if_value(key, b"other", 60)
+        assert tenant_redis.renew_if_value(key, b"owner", 60)
+        assert cast(int, raw_redis.ttl(f"{tenant_id}:{key}")) > 10
+        assert cast(int, raw_redis.ttl(key)) <= 10
+        assert not tenant_redis.renew_if_value(_unique_key(), b"owner", 60)
+    finally:
+        raw_redis.delete(key)

@@ -1,14 +1,14 @@
 /**
  * Page Object Model for the Admin Index Settings page
- * (/admin/configuration/index-settings).
+ * (/admin/index-settings).
  *
- * Encapsulates all locators and interactions for the embedding-model picker
- * and the cloud-provider setup modals so specs stay declarative.
+ * Encapsulates model selection, apply actions, and provider setup dialogs.
  */
 
 import { type Page, type Locator, expect } from "@playwright/test";
+import { ADMIN_ROUTES } from "@/lib/admin-routes";
 
-const INDEX_SETTINGS_URL = "/admin/configuration/index-settings";
+const INDEX_SETTINGS_URL = ADMIN_ROUTES.INDEX_SETTINGS.path;
 
 export class IndexSettingsPage {
   readonly page: Page;
@@ -18,6 +18,14 @@ export class IndexSettingsPage {
   readonly cloudTab: Locator;
   readonly selfHostedTab: Locator;
   readonly applyReindexButton: Locator;
+  readonly applyWithoutReindexButton: Locator;
+  readonly revertButton: Locator;
+  readonly applyContextualModelForwardButton: Locator;
+  readonly rebuildExistingDocumentsButton: Locator;
+  /** The apply strategy dropdown in the changes banner. */
+  readonly strategySelect: Locator;
+  readonly imageProcessingSwitch: Locator;
+  readonly noModelSelectedWarning: Locator;
 
   // The provider setup modal opened via `openProviderSetup`. Held so the
   // credential / model-spec fill methods scope their fields to the right
@@ -35,6 +43,25 @@ export class IndexSettingsPage {
     this.applyReindexButton = page.getByRole("button", {
       name: "Apply & Re-index",
     });
+    this.applyContextualModelForwardButton = page.getByRole("button", {
+      name: "Apply to new and updated documents",
+    });
+    this.rebuildExistingDocumentsButton = page.getByRole("button", {
+      name: "Rebuild all existing documents",
+    });
+    this.applyWithoutReindexButton = page.getByRole("button", {
+      name: "Apply without Re-index",
+    });
+    this.revertButton = page.getByRole("button", { name: "Revert" });
+    // Opal's select is a combobox named by its placeholder; its value is
+    // the chosen option's title.
+    this.strategySelect = page.getByRole("combobox", {
+      name: "Select a switchover strategy",
+    });
+    this.imageProcessingSwitch = page.getByRole("switch", {
+      name: /extract & caption images/i,
+    });
+    this.noModelSelectedWarning = page.getByText("No model selected");
   }
 
   // ---------------------------------------------------------------------------
@@ -150,5 +177,121 @@ export class IndexSettingsPage {
 
   async applyReindex(): Promise<void> {
     await this.applyReindexButton.click();
+  }
+
+  async stageContextualModel(displayName: string): Promise<void> {
+    await this.pickModelInField("Contextual Retrieval LLM", displayName);
+  }
+
+  async pickCaptioningModel(displayName: string): Promise<void> {
+    await this.pickModelInField("Captioning LLM", displayName);
+  }
+
+  /**
+   * Open the model picker in the labelled row, search, and choose the row.
+   * The list is portalled and carries its own search box, scoped here so
+   * the page's search field is not matched; a search unfolds every
+   * provider group.
+   */
+  private async pickModelInField(
+    fieldLabel: string,
+    displayName: string
+  ): Promise<void> {
+    await this.page
+      .locator("label")
+      .filter({ hasText: fieldLabel })
+      .getByRole("combobox", { name: "Select model" })
+      .click();
+    const listbox = this.page.getByRole("listbox", { name: "Select model" });
+    await listbox.getByRole("textbox", { name: "Search" }).fill(displayName);
+    await listbox.getByRole("option", { name: displayName }).click();
+  }
+
+  /** Open the contextual model picker and leave it open, touching nothing. */
+  async openContextualModelPicker(): Promise<void> {
+    await this.page
+      .locator("label")
+      .filter({ hasText: "Contextual Retrieval LLM" })
+      .getByRole("combobox", { name: "Select model" })
+      .click();
+    await expect(this.modelListbox).toBeVisible();
+  }
+
+  /**
+   * The open list shows its selection without help: the selected row is on
+   * screen and, when the list is long enough to scroll, its first row is not.
+   */
+  async expectPickerOpenedOnSelection(): Promise<void> {
+    await expect(
+      this.modelListbox.getByRole("option", { selected: true })
+    ).toBeInViewport();
+    await expect(
+      this.modelListbox.getByRole("option").first()
+    ).not.toBeInViewport();
+  }
+
+  private get modelListbox(): Locator {
+    return this.page.getByRole("listbox", { name: "Select model" });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Apply strategy
+  // ---------------------------------------------------------------------------
+
+  async selectStrategy(label: string): Promise<void> {
+    await this.strategySelect.click();
+    await this.page
+      .getByRole("listbox", { name: "Select a switchover strategy" })
+      .getByRole("option", { name: label })
+      .click();
+  }
+
+  async expectStrategy(label: RegExp): Promise<void> {
+    await expect(this.strategySelect).toHaveValue(label);
+  }
+
+  /** Opens the dropdown, asserts the option is not offered, and closes it. */
+  async expectStrategyOptionAbsent(label: string): Promise<void> {
+    await this.strategySelect.click();
+    const listbox = this.page.getByRole("listbox", {
+      name: "Select a switchover strategy",
+    });
+    await expect(listbox.getByRole("option").first()).toBeVisible();
+    await expect(listbox.getByRole("option", { name: label })).toHaveCount(0);
+    await this.page.keyboard.press("Escape");
+  }
+
+  async expectBannerTitle(title: string): Promise<void> {
+    await expect(this.page.getByText(title, { exact: true })).toBeVisible();
+  }
+
+  async expectContextualModelActions(): Promise<void> {
+    await expect(this.applyContextualModelForwardButton).toBeVisible();
+    await expect(this.rebuildExistingDocumentsButton).toBeVisible();
+  }
+
+  async openForwardOnlyConfirmation(): Promise<void> {
+    await this.applyContextualModelForwardButton.click();
+    await expect(this.forwardOnlyDialog).toBeVisible();
+  }
+
+  async expectForwardOnlyWarning(): Promise<void> {
+    await expect(this.forwardOnlyDialog).toContainText(
+      "Existing documents will keep context generated by the previous model"
+    );
+  }
+
+  async confirmForwardOnlyUpdate(): Promise<void> {
+    await this.forwardOnlyDialog
+      .getByRole("button", {
+        name: "Apply to new and updated documents",
+      })
+      .click();
+  }
+
+  private get forwardOnlyDialog(): Locator {
+    return this.page.getByRole("dialog", {
+      name: "Apply Contextual Retrieval LLM going forward",
+    });
   }
 }

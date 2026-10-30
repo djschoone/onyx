@@ -35,8 +35,10 @@ Keep these when resolving conflicts:
 - `web/src/components/icons/icons.tsx` — `OsTicketIcon`
 - `web/src/lib/types.ts` — `ValidSources.OsTicket`
 - `web/src/lib/sources.ts` — `osticket` metadata
-- `web/src/lib/connectors/connectors.tsx` — config form + `OsTicketConfig`
-- `web/src/lib/connectors/credentials.ts` — `osticket_api_key`
+- `web/src/lib/connectors/connectors.tsx` — config form
+- `web/src/lib/connectors/types/connectorConfig.ts` — `OsTicketConfig`
+- `web/src/lib/connectors/credentials.ts` — `osticket_api_key` template
+- `web/src/lib/connectors/types/credentialJson.ts` — `OsTicketCredentialJson`
 
 For all **other** conflict files: prefer upstream (`--theirs` during the merge).
 
@@ -248,6 +250,7 @@ If you deploy prebuilt Hub tags instead of building from git, bump `IMAGE_TAG` a
 | --- | --- | --- |
 | v3.3.0 | `dmedia-osticket-upgrade-v3.3.0` | First recorded merge of osTicket onto v3.3 |
 | v4.3.9 | `dmedia-osticket-upgrade-v4.3.9` | Large jump v3.3 → v4.3; Vespa→OpenSearch; dmedia compose becomes thin overrides |
+| v4.9.6 | `dmedia-osticket-upgrade-v4.9.6` | Jump from v4.3.9. Keep `AUTH_TYPE` in `.env` through the first start so Google OAuth migrates into Admin → SSO. Do not jump to v5 in this step (MinIO → SeaweedFS). |
 
 Add a row here after each successful production upgrade.
 

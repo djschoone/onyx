@@ -1,16 +1,13 @@
 import contextlib
 from collections.abc import Generator
-from typing import Optional
-from typing import Protocol
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Protocol
 
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from onyx.access.models import DocumentAccess
+from onyx.configs.constants import DocumentSource
 from onyx.connectors.models import Document
-from onyx.db.enums import EmbeddingPrecision
-from onyx.db.enums import SwitchoverType
+from onyx.db.enums import EmbeddingPrecision, SwitchoverType
 from onyx.utils.logger import setup_logger
 from onyx.utils.pydantic_util import shallow_model_dump
 from shared_configs.enums import EmbeddingProvider
@@ -116,6 +113,7 @@ class DocMetadataAwareIndexChunk(IndexChunk):
     personas: list[int]
     boost: int
     aggregated_chunk_boost_factor: float
+    source_types: tuple[DocumentSource, ...] = ()
     # Full ancestor path from root hierarchy node to document's parent.
     # Stored as an integer array in OpenSearch for hierarchy-based filtering.
     # Empty list means no hierarchy info (document excluded from hierarchy searches).
@@ -133,6 +131,7 @@ class DocMetadataAwareIndexChunk(IndexChunk):
         aggregated_chunk_boost_factor: float,
         tenant_id: str,
         ancestor_hierarchy_node_ids: list[int] | None = None,
+        source_types: tuple[DocumentSource, ...] | None = None,
     ) -> "DocMetadataAwareIndexChunk":
         return cls.model_construct(
             **shallow_model_dump(index_chunk),
@@ -144,6 +143,7 @@ class DocMetadataAwareIndexChunk(IndexChunk):
             aggregated_chunk_boost_factor=aggregated_chunk_boost_factor,
             tenant_id=tenant_id,
             ancestor_hierarchy_node_ids=ancestor_hierarchy_node_ids or [],
+            source_types=source_types or (index_chunk.source_document.source,),
         )
 
 
@@ -261,7 +261,12 @@ class IndexingBatchAdapter(Protocol):
     credential_id: int | None
 
     def prepare(
-        self, documents: list[Document], ignore_time_skip: bool
+        self,
+        documents: list[Document],
+        ignore_time_skip: bool,
+        index_to_secondary: bool,
+        force_update: bool = False,
+        skip_document_row_writes: bool = False,
     ) -> Optional["DocumentBatchPrepareContext"]: ...
 
     @contextlib.contextmanager
@@ -290,4 +295,6 @@ class IndexingBatchAdapter(Protocol):
         filtered_documents: list[Document],
         enrichment: ChunkEnrichmentContext,
         db_session: Session,
+        index_to_secondary: bool,
+        failed_document_ids: set[str],
     ) -> None: ...

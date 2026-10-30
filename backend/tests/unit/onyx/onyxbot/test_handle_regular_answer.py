@@ -1,9 +1,8 @@
-"""Tests for Slack channel reference resolution and tag filtering
-in handle_regular_answer.py."""
+"""Slack answer handling: references, access checks, and usage attribution."""
 
-from collections.abc import Callable
-from unittest.mock import MagicMock
-from unittest.mock import patch
+from collections.abc import Callable, Generator
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from slack_sdk.errors import SlackApiError
@@ -11,17 +10,29 @@ from slack_sdk.errors import SlackApiError
 from onyx.chat.models import ChatBasicResponse
 from onyx.context.search.models import Tag
 from onyx.onyxbot.slack.constants import SLACK_CHANNEL_REF_PATTERN
-from onyx.onyxbot.slack.handlers.handle_regular_answer import handle_regular_answer
-from onyx.onyxbot.slack.handlers.handle_regular_answer import resolve_channel_references
 from onyx.onyxbot.slack.handlers.handle_regular_answer import (
     SLACK_PERSONA_ACCESS_DENIED_MESSAGE,
+    handle_regular_answer,
+    resolve_channel_references,
 )
-from onyx.onyxbot.slack.models import ChannelType
-from onyx.onyxbot.slack.models import SlackContext
-from onyx.onyxbot.slack.models import SlackMessageInfo
-from onyx.onyxbot.slack.models import ThreadMessage
+from onyx.onyxbot.slack.models import (
+    ChannelType,
+    SlackContext,
+    SlackMessageInfo,
+    ThreadMessage,
+)
+from shared_configs.contextvars import get_current_user_id
 
 _HANDLE_REGULAR_ANSWER = "onyx.onyxbot.slack.handlers.handle_regular_answer"
+
+
+@pytest.fixture(autouse=True)
+def _no_token_budgets() -> Generator[None, None, None]:
+    """Budget enforcement reads the DB; it is covered in
+    tests/external_dependency_unit/server/test_llm_entrypoint_budgets.py."""
+    with patch(f"{_HANDLE_REGULAR_ANSWER}.check_token_rate_limits"):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,6 +109,7 @@ def _make_slack_channel_config(
     persona.id = 123
     persona.name = "Scoped Agent"
     persona.document_sets = []
+    persona.tools = []
 
     slack_channel_config = MagicMock()
     slack_channel_config.persona = persona
@@ -481,15 +493,39 @@ def test_persona_access_denied_cancels_feedback_reminder() -> None:
     )
 
 
-def test_private_channel_non_ephemeral_generates_after_persona_access_check() -> None:
-    user = MagicMock()
+@pytest.mark.parametrize("has_mapped_user", [True, False])
+def test_private_channel_non_ephemeral_attributes_usage(
+    has_mapped_user: bool,
+) -> None:
+    user = MagicMock() if has_mapped_user else None
+    if user is not None:
+        user.id = uuid4()
+    service_user = MagicMock()
+    service_user.id = uuid4()
+    usage_user = user or service_user
     anonymous_user = MagicMock()
     client = MagicMock()
     db_session = MagicMock()
     logger = _mock_logger()
+    observed_user_ids: list[str | None] = []
+
+    def _gather_stream(_: object) -> ChatBasicResponse:
+        observed_user_ids.append(get_current_user_id())
+        return ChatBasicResponse(
+            answer="answer",
+            answer_citationless="answer",
+            top_documents=[],
+            error_msg=None,
+            message_id=1,
+            citation_info=[],
+        )
 
     with (
         patch(f"{_HANDLE_REGULAR_ANSWER}.get_user_by_email", return_value=user),
+        patch(
+            f"{_HANDLE_REGULAR_ANSWER}.get_or_create_slack_service_account",
+            return_value=service_user,
+        ) as mock_get_service_account,
         patch(
             f"{_HANDLE_REGULAR_ANSWER}.get_anonymous_user", return_value=anonymous_user
         ),
@@ -507,14 +543,7 @@ def test_private_channel_non_ephemeral_generates_after_persona_access_check() ->
         ),
         patch(
             f"{_HANDLE_REGULAR_ANSWER}.gather_stream",
-            return_value=ChatBasicResponse(
-                answer="answer",
-                answer_citationless="answer",
-                top_documents=[],
-                error_msg=None,
-                message_id=1,
-                citation_info=[],
-            ),
+            side_effect=_gather_stream,
         ),
         patch(
             f"{_HANDLE_REGULAR_ANSWER}.build_slack_response_blocks",
@@ -541,16 +570,100 @@ def test_private_channel_non_ephemeral_generates_after_persona_access_check() ->
     assert result is False
     mock_get_persona_by_id.assert_called_once_with(
         persona_id=123,
-        user=user,
+        user=user or anonymous_user,
         db_session=db_session,
         is_for_edit=False,
     )
+    if has_mapped_user:
+        mock_get_service_account.assert_not_called()
+    else:
+        mock_get_service_account.assert_called_once_with(db_session)
 
     stream_call_kwargs = mock_handle_stream_message_objects.call_args.kwargs
     assert stream_call_kwargs["user"] is anonymous_user
     assert stream_call_kwargs["new_msg_req"].chat_session_info.persona_id == 123
+    assert observed_user_ids == [str(usage_user.id)]
+    assert get_current_user_id() is None
 
     mock_respond.assert_called_once()
     assert mock_respond.call_args.kwargs["receiver_ids"] is None
     mock_update_react.assert_called_once()
     assert mock_update_react.call_args.kwargs["remove"] is True
+
+
+@pytest.mark.parametrize(
+    "has_search_tool,search_available,search_enabled,expected_forced_id",
+    [
+        (True, True, True, 77),  # persona has SearchTool and it is usable -> forced
+        (True, False, True, None),  # SearchTool attached but unavailable -> not forced
+        (True, True, False, None),  # SearchTool attached but disabled -> not forced
+        (False, True, True, None),  # persona without SearchTool -> not forced
+    ],
+)
+def test_search_tool_forced_only_when_usable(
+    has_search_tool: bool,
+    search_available: bool,
+    search_enabled: bool,
+    expected_forced_id: int | None,
+) -> None:
+    """Slack answers force the persona's search tool on the first LLM cycle
+    (regression for the #7399 refactor dropping guaranteed retrieval), but
+    never for personas without a usable search tool."""
+    slack_channel_config = _make_slack_channel_config()
+    persona = slack_channel_config.persona
+    if has_search_tool:
+        search_tool = MagicMock()
+        search_tool.id = 77
+        search_tool.in_code_tool_id = "SearchTool"
+        search_tool.enabled = search_enabled
+        persona.tools = [search_tool]
+
+    user = MagicMock()
+    user.id = uuid4()
+
+    def _gather_stream(_: object) -> ChatBasicResponse:
+        return ChatBasicResponse(
+            answer="answer",
+            answer_citationless="answer",
+            top_documents=[],
+            error_msg=None,
+            message_id=1,
+            citation_info=[],
+        )
+
+    with (
+        patch(f"{_HANDLE_REGULAR_ANSWER}.get_user_by_email", return_value=user),
+        patch(f"{_HANDLE_REGULAR_ANSWER}.get_anonymous_user", return_value=MagicMock()),
+        patch(f"{_HANDLE_REGULAR_ANSWER}.get_persona_by_id", return_value=persona),
+        patch(f"{_HANDLE_REGULAR_ANSWER}.rate_limits", side_effect=_identity_decorator),
+        patch(
+            f"{_HANDLE_REGULAR_ANSWER}.retry_builder", side_effect=_identity_decorator
+        ),
+        patch(
+            f"{_HANDLE_REGULAR_ANSWER}.get_channel_name_from_id",
+            return_value=("channel", False),
+        ),
+        patch(f"{_HANDLE_REGULAR_ANSWER}.gather_stream", side_effect=_gather_stream),
+        patch(f"{_HANDLE_REGULAR_ANSWER}.build_slack_response_blocks", return_value=[]),
+        patch(
+            f"{_HANDLE_REGULAR_ANSWER}.handle_stream_message_objects",
+            return_value=iter(()),
+        ) as mock_handle_stream_message_objects,
+        patch(f"{_HANDLE_REGULAR_ANSWER}.SearchTool") as mock_search_tool_cls,
+        patch(f"{_HANDLE_REGULAR_ANSWER}.respond_in_thread_or_channel"),
+        patch(f"{_HANDLE_REGULAR_ANSWER}.update_emote_react"),
+    ):
+        mock_search_tool_cls.is_available.return_value = search_available
+        handle_regular_answer(
+            message_info=_make_slack_message_info(ChannelType.IM),
+            slack_channel_config=slack_channel_config,
+            receiver_ids=None,
+            client=MagicMock(),
+            channel="C123",
+            logger=_mock_logger(),
+            db_session=MagicMock(),
+            feedback_reminder_id=None,
+        )
+
+    stream_call_kwargs = mock_handle_stream_message_objects.call_args.kwargs
+    assert stream_call_kwargs["new_msg_req"].forced_tool_id == expected_forced_id

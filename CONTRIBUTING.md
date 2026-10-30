@@ -306,6 +306,16 @@ If you want to make changes to Onyx and run those changes in Docker, you can als
 docker compose up -d --build
 ```
 
+> **Note:** Local builds use the public Docker Hub base images, so they need no extra
+> registry access. Our release builds override the base images with the Docker Hardened
+> Image (`dhi.io`) equivalents, so the published `onyxdotapp/onyx-web-server` and
+> `onyxdotapp/onyx-model-server` images differ from a local `--build` in their base layers.
+
+> **Note:** `docker-compose.yml`, `docker-compose.prod.yml` and
+> `docker-compose.prod-no-letsencrypt.yml` are generated from `docker-compose.template.yml`
+> by `ods generate-compose` (enforced by the `docker-compose-sync` pre-commit hook) — edit
+> the template, not the generated files. See `deployment/docker_compose/README.md`.
+
 ---
 
 ## macOS-Specific Notes

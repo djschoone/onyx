@@ -1,71 +1,125 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import type { Route } from "next";
+import { useTranslations } from "next-intl";
 import { SettingsLayouts } from "@opal/layouts";
-import { SidebarTab } from "@opal/components";
+import { InputSingleSelect, SidebarTab } from "@opal/components";
 import { SvgSliders } from "@opal/icons";
 import { useUser } from "@/providers/UserProvider";
-import { useAuthType } from "@/lib/hooks";
+import { useIsMultiTenant } from "@/lib/auth/hooks";
 import { Section } from "@/layouts/general-layouts";
+import { useTierAtLeast } from "@/hooks/useTierAtLeast";
+import { LLM_GATEWAY_MIN_TIER } from "@/lib/tiers";
+import { useLanguageModels } from "@/lib/languageModels/hooks";
+import { hasVisibleLLMModel } from "@/lib/languageModels/utils";
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
+interface SettingsTab {
+  href: string;
+  label: string;
+}
+
 export default function Layout({ children }: LayoutProps) {
+  const t = useTranslations("settings.layout");
   const pathname = usePathname();
+  const router = useRouter();
   const { user } = useUser();
-  const authType = useAuthType();
+  const isMultiTenant = useIsMultiTenant();
+  const gatewayTier = useTierAtLeast(LLM_GATEWAY_MIN_TIER);
+  const { llmProviders } = useLanguageModels();
 
   const showPasswordSection = Boolean(user?.password_configured);
-  const showTokensSection = authType !== null;
+  const showTokensSection = isMultiTenant !== null;
   const showAccountsAccessTab = showPasswordSection || showTokensSection;
+  const showGatewayTab = gatewayTier && hasVisibleLLMModel(llmProviders);
+
+  const tabs: SettingsTab[] = [
+    { href: "/app/settings/general", label: t("tabs.general.label") },
+    {
+      href: "/app/settings/chat-preferences",
+      label: t("tabs.chatPreferences.label"),
+    },
+    ...(showAccountsAccessTab
+      ? [
+          {
+            href: "/app/settings/accounts-access",
+            label: t("tabs.accountsAccess.label"),
+          },
+        ]
+      : []),
+    ...(showGatewayTab
+      ? [
+          {
+            href: "/app/settings/llm-gateway",
+            label: t("tabs.llmGateway.label"),
+          },
+        ]
+      : []),
+    { href: "/app/settings/connectors", label: t("tabs.connectors.label") },
+    { href: "/app/settings/usage", label: t("tabs.usage.label") },
+  ];
+
+  // A route outside `tabs` selects nothing, so the select shows its
+  // placeholder instead of the raw path.
+  const activeTab = tabs.find((tab) => tab.href === pathname);
 
   return (
     <SettingsLayouts.Root width="lg">
-      <SettingsLayouts.Header icon={SvgSliders} title="Settings" divider />
+      <SettingsLayouts.Header
+        icon={SvgSliders}
+        title={t("header.title")}
+        divider
+      />
 
       <SettingsLayouts.Body>
         <Section
-          flexDirection="row"
+          flexDirection="column"
           justifyContent="start"
-          alignItems="start"
-          gap={1.5}
+          alignItems="stretch"
+          gap={6}
+          className="sm:flex-row sm:items-start"
         >
-          {/* Left: Tab Navigation */}
+          {/* Narrow screens: dropdown navigation above the tab content */}
           <div
-            data-testid="settings-left-tab-navigation"
-            className="flex flex-col px-2 min-w-50"
+            data-testid="settings-tab-navigation-dropdown"
+            className="sm:hidden"
           >
-            <SidebarTab
-              href="/app/settings/general"
-              selected={pathname === "/app/settings/general"}
-            >
-              General
-            </SidebarTab>
-            <SidebarTab
-              href="/app/settings/chat-preferences"
-              selected={pathname === "/app/settings/chat-preferences"}
-            >
-              Chat Preferences
-            </SidebarTab>
-            {showAccountsAccessTab && (
-              <SidebarTab
-                href="/app/settings/accounts-access"
-                selected={pathname === "/app/settings/accounts-access"}
-              >
-                Accounts & Access
-              </SidebarTab>
-            )}
-            <SidebarTab
-              href="/app/settings/connectors"
-              selected={pathname === "/app/settings/connectors"}
-            >
-              Connectors
-            </SidebarTab>
+            <InputSingleSelect
+              // A route outside `tabs` shows the placeholder, not the raw path.
+              value={activeTab?.href ?? ""}
+              onValueChange={(href) =>
+                // SAFETY: the options are the static hrefs in `tabs`.
+                router.push(href as Route, { scroll: false })
+              }
+              placeholder={t("sectionSelect.placeholder")}
+              options={tabs.map((tab) => ({
+                value: tab.href,
+                title: tab.label,
+              }))}
+            />
           </div>
 
-          {/* Right: Tab Content */}
+          {/* Wide screens: left tab navigation */}
+          <div
+            data-testid="settings-left-tab-navigation"
+            className="hidden sm:flex flex-col px-2 min-w-50"
+          >
+            {tabs.map((tab) => (
+              <SidebarTab
+                key={tab.href}
+                href={tab.href}
+                selected={pathname === tab.href}
+              >
+                {tab.label}
+              </SidebarTab>
+            ))}
+          </div>
+
+          {/* Tab Content */}
           {children}
         </Section>
       </SettingsLayouts.Body>

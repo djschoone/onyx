@@ -3,13 +3,17 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from onyx.context.search.models import BaseFilters
-from onyx.context.search.models import ChunkIndexRequest
-from onyx.context.search.models import ChunkSearchRequest
-from onyx.context.search.models import IndexFilters
-from onyx.context.search.models import InferenceChunk
-from onyx.context.search.models import InferenceSection
-from onyx.context.search.models import PersonaSearchInfo
+from onyx.context.search.forced_document_set import get_forced_document_set_names
+from onyx.context.search.models import (
+    BaseFilters,
+    ChunkIndexRequest,
+    ChunkSearchRequest,
+    IndexFilters,
+    InferenceChunk,
+    InferenceSection,
+    PersonaSearchInfo,
+    TimeRange,
+)
 from onyx.context.search.preprocessing.access_filters import (
     build_access_filters_for_user,
 )
@@ -41,23 +45,24 @@ def _build_index_filters(
     persona_document_sets: list[str] | None,
     persona_time_cutoff: datetime | None,
     db_session: Session | None = None,
-    bypass_acl: bool = False,
     # Assistant knowledge filters
     attached_document_ids: list[str] | None = None,
     hierarchy_node_ids: list[int] | None = None,
     # Pre-fetched ACL filters (skips DB query when provided)
     acl_filters: list[str] | None = None,
+    # Search UI only: apply the operator-forced document-set scope
+    # (FORCED_DOCUMENT_SET_NAMES) as a hard AND restriction. Left False for chat and
+    # every other caller, so they are unaffected.
+    force_configured_document_set_scope: bool = False,
 ) -> IndexFilters:
     base_filters = user_provided_filters or BaseFilters()
 
     # When the caller supplies document set names, enforce that the user has view
     # access to each one. This closes the API-layer bypass where a user could
     # override the persona's configured document sets with arbitrary names.
-    # Skipped when bypass_acl is set (system callers) or when no db_session is
-    # available for the lookup.
+    # Skipped when no db_session is available for the lookup.
     if (
         base_filters.document_set is not None
-        and not bypass_acl
         and not user.is_anonymous
         and db_session is not None
     ):
@@ -81,30 +86,52 @@ def _build_index_filters(
         else persona_document_sets
     )
 
-    time_filter = base_filters.time_cutoff or persona_time_cutoff
+    # The persona's search_start_date floor must never be loosened.
+    updated_at_range = base_filters.updated_at_range
+    floor_starts = [
+        bound
+        for bound in (
+            updated_at_range.start if updated_at_range else None,
+            persona_time_cutoff,
+        )
+        if bound is not None
+    ]
+    if floor_starts:
+        updated_at_range = TimeRange(
+            start=max(floor_starts),
+            end=updated_at_range.end if updated_at_range else None,
+        )
+
     source_filter = base_filters.source_type
 
-    if bypass_acl:
-        user_acl_filters = None
-    elif acl_filters is not None:
+    if acl_filters is not None:
         user_acl_filters = acl_filters
     else:
         if db_session is None:
             raise ValueError("Either db_session or acl_filters must be provided")
         user_acl_filters = build_access_filters_for_user(user, db_session)
 
+    # Enforced downstream as an AND clause in _get_search_filters (Search UI only).
+    forced_document_set = (
+        get_forced_document_set_names(db_session)
+        if force_configured_document_set_scope
+        else None
+    )
+
     final_filters = IndexFilters(
         project_id_filter=project_id_filter,
         persona_id_filter=persona_id_filter,
         source_type=source_filter,
         document_set=document_set_filter,
-        time_cutoff=time_filter,
+        created_at_range=base_filters.created_at_range,
+        updated_at_range=updated_at_range,
         tags=base_filters.tags,
         access_control_list=user_acl_filters,
         tenant_id=get_current_tenant_id() if MULTI_TENANT else None,
         # Assistant knowledge filters
         attached_document_ids=attached_document_ids,
         hierarchy_node_ids=hierarchy_node_ids,
+        forced_document_set=forced_document_set,
     )
 
     return final_filters
@@ -142,7 +169,7 @@ def merge_individual_chunks(
     chunk_to_section: dict[tuple[str, int], InferenceSection] = {}
 
     # Process each document's chunks
-    for doc_id, doc_chunk_list in doc_chunks.items():
+    for doc_chunk_list in doc_chunks.values():
         if not doc_chunk_list:
             continue
 
@@ -248,6 +275,9 @@ def search_pipeline(
     acl_filters: list[str] | None = None,
     embedding_model: EmbeddingModel | None = None,
     prefetched_federated_retrieval_infos: list[FederatedRetrievalInfo] | None = None,
+    # Search UI only: apply the operator-forced document-set scope
+    # (FORCED_DOCUMENT_SET_NAMES). Chat and other callers leave this False.
+    force_configured_document_set_scope: bool = False,
 ) -> list[InferenceChunk]:
     persona_document_sets: list[str] | None = (
         persona_search_info.document_set_names if persona_search_info else None
@@ -272,10 +302,10 @@ def search_pipeline(
         persona_document_sets=persona_document_sets,
         persona_time_cutoff=persona_time_cutoff,
         db_session=db_session,
-        bypass_acl=chunk_search_request.bypass_acl,
         attached_document_ids=attached_document_ids,
         hierarchy_node_ids=hierarchy_node_ids,
         acl_filters=acl_filters,
+        force_configured_document_set_scope=force_configured_document_set_scope,
     )
 
     query_keywords = strip_stopwords(chunk_search_request.query)

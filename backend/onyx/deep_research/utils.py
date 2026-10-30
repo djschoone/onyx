@@ -3,12 +3,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from onyx.deep_research.dr_mock_tools import GENERATE_REPORT_TOOL_NAME
-from onyx.deep_research.dr_mock_tools import THINK_TOOL_NAME
+from onyx.deep_research.dr_mock_tools import GENERATE_REPORT_TOOL_NAME, THINK_TOOL_NAME
 from onyx.deep_research.models import SpecialToolCalls
-from onyx.llm.model_response import ChatCompletionDeltaToolCall
-from onyx.llm.model_response import Delta
-from onyx.llm.model_response import FunctionCall
+from onyx.llm.model_response import (
+    ChatCompletionDeltaToolCall,
+    Delta,
+    ResponseFunctionCall,
+)
 from onyx.tools.models import ToolCallKickoff
 
 # JSON prefixes to detect in think_tool arguments
@@ -114,7 +115,7 @@ def _extract_reasoning_chunk(state: ThinkToolProcessorState) -> str | None:
     if to_emit:
         to_emit = _unescape_json_string(to_emit)
 
-    return to_emit if to_emit else None
+    return to_emit or None
 
 
 def create_think_tool_token_processor() -> Callable[
@@ -147,7 +148,7 @@ def create_think_tool_token_processor() -> Callable[
                     id=state.think_tool_id,
                     index=state.think_tool_index or 0,
                     type="function",
-                    function=FunctionCall(
+                    function=ResponseFunctionCall(
                         name=THINK_TOOL_NAME,
                         arguments=state.full_arguments,
                     ),

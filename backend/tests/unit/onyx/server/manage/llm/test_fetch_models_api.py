@@ -7,26 +7,27 @@ sync-to-DB behavior when provider_id is specified.
 
 import os
 from typing import Any
-from unittest.mock import MagicMock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
 from onyx.db.enums import LLMModelFlowType
 from onyx.error_handling.exceptions import OnyxError
-from onyx.server.manage.llm.models import BedrockModelsRequest
-from onyx.server.manage.llm.models import BifrostFinalModelResponse
-from onyx.server.manage.llm.models import BifrostModelsRequest
-from onyx.server.manage.llm.models import LitellmFinalModelResponse
-from onyx.server.manage.llm.models import LitellmModelsRequest
-from onyx.server.manage.llm.models import LMStudioFinalModelResponse
-from onyx.server.manage.llm.models import LMStudioModelsRequest
-from onyx.server.manage.llm.models import OllamaFinalModelResponse
-from onyx.server.manage.llm.models import OllamaModelsRequest
-from onyx.server.manage.llm.models import OpenAICompatibleModelsRequest
-from onyx.server.manage.llm.models import OpenRouterFinalModelResponse
-from onyx.server.manage.llm.models import OpenRouterModelsRequest
+from onyx.server.manage.llm.models import (
+    BedrockModelsRequest,
+    BifrostFinalModelResponse,
+    BifrostModelsRequest,
+    LitellmFinalModelResponse,
+    LitellmModelsRequest,
+    LMStudioFinalModelResponse,
+    LMStudioModelsRequest,
+    OllamaFinalModelResponse,
+    OllamaModelsRequest,
+    OpenAICompatibleModelsRequest,
+    OpenRouterFinalModelResponse,
+    OpenRouterModelsRequest,
+)
 
 
 class TestGetOllamaAvailableModels:
@@ -599,6 +600,60 @@ class TestGetLMStudioAvailableModels:
 
             assert deepseek.supports_reasoning is True
             assert llama.supports_reasoning is False
+
+    def test_reads_capabilities_given_as_options_objects(self) -> None:
+        """Test that option-object capabilities are read as booleans.
+
+        Newer LM Studio servers describe a capability with an object such as
+        {"allowed_options": ["off", "on"], "default": "on"} instead of a bool.
+        """
+        from onyx.server.manage.llm.api import get_lm_studio_available_models
+
+        mock_session = MagicMock()
+        response = {
+            "models": [
+                {
+                    "key": "openai/gpt-oss-20b",
+                    "type": "llm",
+                    "display_name": "gpt-oss 20B",
+                    "max_context_length": 131072,
+                    "capabilities": {
+                        "reasoning": {
+                            "allowed_options": ["off", "low", "medium", "high"],
+                            "default": "medium",
+                        },
+                        "vision": {"allowed_options": ["off", "on"], "default": "on"},
+                    },
+                },
+                {
+                    "key": "lmstudio-community/Meta-Llama-3-8B",
+                    "type": "llm",
+                    "display_name": "Meta Llama 3 8B",
+                    "max_context_length": 8192,
+                    "capabilities": {
+                        "reasoning": {"allowed_options": ["off"], "default": "off"},
+                        "vision": False,
+                    },
+                },
+            ]
+        }
+
+        with patch("onyx.server.manage.llm.api.httpx") as mock_httpx:
+            mock_response = MagicMock()
+            mock_response.json.return_value = response
+            mock_response.raise_for_status = MagicMock()
+            mock_httpx.get.return_value = mock_response
+
+            request = LMStudioModelsRequest(api_base="http://localhost:1234")
+            results = get_lm_studio_available_models(request, MagicMock(), mock_session)
+
+            gpt_oss = next(r for r in results if "gpt-oss" in r.name)
+            llama = next(r for r in results if "Llama" in r.name)
+
+            assert gpt_oss.supports_reasoning is True
+            assert gpt_oss.supports_image_input is True
+            assert llama.supports_reasoning is False
+            assert llama.supports_image_input is False
 
     def test_uses_display_name_from_api(self, mock_lm_studio_response: dict) -> None:
         """Test that display_name from the API is used directly."""
@@ -1353,8 +1408,8 @@ class TestGetBifrostAvailableModels:
         return {
             "data": [
                 {
-                    "id": "anthropic/claude-3-5-sonnet",
-                    "name": "Claude 3.5 Sonnet",
+                    "id": "anthropic/claude-sonnet-4-5",
+                    "name": "Claude Sonnet 4.5",
                     "context_length": 200000,
                 },
                 {
@@ -1406,7 +1461,7 @@ class TestGetBifrostAvailableModels:
             request = BifrostModelsRequest(api_base="https://bifrost.example.com")
             results = get_bifrost_available_models(request, MagicMock(), mock_session)
 
-            claude = next(r for r in results if r.name == "anthropic/claude-3-5-sonnet")
+            claude = next(r for r in results if r.name == "anthropic/claude-sonnet-4-5")
             gpt4o = next(r for r in results if r.name == "openai/gpt-4o")
             deepseek = next(r for r in results if r.name == "deepseek/deepseek-r1")
 
@@ -1666,8 +1721,10 @@ class TestGetBedrockAvailableModels:
         """Editing an existing provider sends the masked bearer token. The
         endpoint must swap it back for the stored value so the per-session
         token provider carries real credentials, not the masked placeholder."""
-        from onyx.server.manage.llm.api import _mask_string
-        from onyx.server.manage.llm.api import get_bedrock_available_models
+        from onyx.server.manage.llm.api import (
+            _mask_string,
+            get_bedrock_available_models,
+        )
 
         real_token = "real-bearer-token-secret"
         masked_token = _mask_string(real_token)

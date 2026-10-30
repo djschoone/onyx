@@ -1,22 +1,26 @@
-import "@opal/components/cards/shared.css";
+"use client";
+
 import "@opal/components/cards/message-card/styles.css";
 import { cn } from "@opal/utils";
 import type {
+  CardColor,
   IconFunctionComponent,
-  PaddingVariants,
   RichStr,
   StatusVariants,
 } from "@opal/types";
-import { paddingVariants } from "@opal/shared";
+import { spacingToRem } from "@opal/shared";
 import { ContentAction } from "@opal/layouts";
+import { Card } from "@opal/components/cards/card/components";
 import { Button, Divider } from "@opal/components";
 import {
   SvgAlertCircle,
   SvgAlertTriangle,
   SvgCheckCircle,
+  SvgClock,
   SvgX,
   SvgXOctagon,
 } from "@opal/icons";
+import { useOpalStrings } from "@opal/strings";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,11 +42,23 @@ interface MessageCardBaseProps {
   /** Clamp the title to N lines with ellipsis. Default: `1`. Pass `undefined` to wrap freely. */
   titleMaxLines?: number;
 
-  /** Padding preset. @default "sm" */
-  padding?: Extract<PaddingVariants, "sm" | "xs">;
+  /**
+   * Padding of the outer card, as a spacing step (`N / 4` rem). Narrowed on
+   * purpose — a message card is a fixed-density surface, so only these two
+   * densities are offered.
+   *
+   * @default 2
+   */
+  outerPadding?: 1 | 2;
 
-  /** Padding around the header Content area. @default "fit" */
-  headerPadding?: PaddingVariants;
+  /**
+   * Padding around the header Content area, as a spacing step. Narrowed like
+   * `outerPadding`: cards inside a modal or popover use 1 for both, cards on
+   * a page use 2 for both.
+   *
+   * @default 2
+   */
+  innerPadding?: 1 | 2;
 
   /**
    * Content rendered below a divider, under the main content area.
@@ -74,13 +90,38 @@ type MessageCardProps = MessageCardBaseProps &
 
 const VARIANT_CONFIG: Record<
   StatusVariants,
-  { icon: IconFunctionComponent; iconClass: string }
+  { icon: IconFunctionComponent; iconClass: string; color: CardColor }
 > = {
-  default: { icon: SvgAlertCircle, iconClass: "stroke-text-03" },
-  info: { icon: SvgAlertCircle, iconClass: "stroke-status-info-05" },
-  success: { icon: SvgCheckCircle, iconClass: "stroke-status-success-05" },
-  warning: { icon: SvgAlertTriangle, iconClass: "stroke-status-warning-05" },
-  error: { icon: SvgXOctagon, iconClass: "stroke-status-error-05" },
+  default: {
+    icon: SvgAlertCircle,
+    iconClass: "stroke-text-03",
+    color: "background-tint-01",
+  },
+  info: {
+    icon: SvgAlertCircle,
+    iconClass: "stroke-status-info-05",
+    color: "status-info-00",
+  },
+  success: {
+    icon: SvgCheckCircle,
+    iconClass: "stroke-status-success-05",
+    color: "status-success-00",
+  },
+  warning: {
+    icon: SvgAlertTriangle,
+    iconClass: "stroke-status-warning-05",
+    color: "status-warning-00",
+  },
+  pending: {
+    icon: SvgClock,
+    iconClass: "stroke-theme-amber-05",
+    color: "theme-amber-01",
+  },
+  error: {
+    icon: SvgXOctagon,
+    iconClass: "stroke-status-error-05",
+    color: "status-error-00",
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -128,15 +169,16 @@ function MessageCard({
   title,
   description,
   titleMaxLines,
-  padding = "sm",
-  headerPadding = "fit",
+  outerPadding = 2,
+  innerPadding = 2,
   bottomChildren,
   rightChildren,
   onClose,
   ref,
 }: MessageCardProps) {
-  const { icon: DefaultIcon, iconClass } = VARIANT_CONFIG[variant];
+  const { icon: DefaultIcon, iconClass, color } = VARIANT_CONFIG[variant];
   const Icon = iconOverride ?? DefaultIcon;
+  const strings = useOpalStrings();
 
   const right = onClose ? (
     <Button
@@ -144,40 +186,50 @@ function MessageCard({
       prominence="internal"
       size="md"
       onClick={onClose}
-      aria-label="Close"
+      aria-label={strings.close}
+      data-message-card-close=""
     />
   ) : (
     rightChildren
   );
 
+  // Built on Card: the root owns color, border, rounding, and padding, so
+  // this component keeps only its message layout. The wrapper preserves the
+  // stretch behavior the old root class carried, since Card takes no
+  // className.
   return (
-    <div
-      className={cn("opal-message-card", paddingVariants[padding])}
-      data-variant={variant}
-      data-opal-status-border={variant}
-      ref={ref}
-    >
-      <div className={paddingVariants[headerPadding]}>
-        <ContentAction
-          icon={(props) => (
-            <Icon {...props} className={cn(props.className, iconClass)} />
-          )}
-          title={title}
-          description={description}
-          titleMaxLines={titleMaxLines}
-          sizePreset="main-ui"
-          variant="section"
-          padding="md"
-          rightChildren={right}
-        />
-      </div>
+    <div className="opal-message-card" ref={ref} data-variant={variant}>
+      <Card
+        color={color}
+        border="solid"
+        borderColor={variant}
+        rounding={4}
+        padding={outerPadding}
+      >
+        <div className="opal-message-card-layout">
+          <div style={{ padding: spacingToRem(innerPadding) }}>
+            <ContentAction
+              icon={(props) => (
+                <Icon {...props} className={cn(props.className, iconClass)} />
+              )}
+              title={title}
+              description={description}
+              titleMaxLines={titleMaxLines}
+              sizePreset="main-ui"
+              variant="section"
+              rightChildren={right}
+              padding={0}
+            />
+          </div>
 
-      {bottomChildren && (
-        <>
-          <Divider paddingParallel="sm" paddingPerpendicular="xs" />
-          {bottomChildren}
-        </>
-      )}
+          {bottomChildren && (
+            <>
+              <Divider paddingParallel={2} paddingPerpendicular={1} />
+              {bottomChildren}
+            </>
+          )}
+        </div>
+      </Card>
     </div>
   );
 }

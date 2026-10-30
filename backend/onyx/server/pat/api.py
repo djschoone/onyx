@@ -1,24 +1,24 @@
 """API endpoints for Personal Access Tokens."""
 
-from fastapi import APIRouter
-from fastapi import Depends
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from onyx.auth.permissions import require_permission
 from onyx.db.engine.sql_engine import get_session
-from onyx.db.enums import PatType
-from onyx.db.enums import Permission
+from onyx.db.enums import PatType, Permission
 from onyx.db.models import User
-from onyx.db.pat import create_pat
-from onyx.db.pat import list_user_pats
-from onyx.db.pat import revoke_pat
+from onyx.db.pat import create_pat, list_user_pats, revoke_pat
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
-from onyx.server.pat.models import CreatedTokenResponse
-from onyx.server.pat.models import CreateTokenRequest
-from onyx.server.pat.models import PatScopeOption
-from onyx.server.pat.models import SELECTABLE_PAT_SCOPES
-from onyx.server.pat.models import TokenResponse
+from onyx.server.pat.models import (
+    SELECTABLE_PAT_SCOPES,
+    CreatedTokenResponse,
+    CreateTokenRequest,
+    PatScopeOption,
+    TokenResponse,
+)
+from onyx.server.settings.store import load_settings
+from onyx.server.settings.tier_order import get_current_tier, tier_at_least
 from onyx.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -41,6 +41,24 @@ def _validate_assignable_scopes(scopes: list[Permission] | None) -> None:
             OnyxErrorCode.INVALID_INPUT,
             f"Unsupported token scope(s): {', '.join(s.value for s in unsupported)}",
         )
+    tier = get_current_tier()
+    below_tier = [
+        s for s in scopes if not tier_at_least(tier, SELECTABLE_PAT_SCOPES[s].min_tier)
+    ]
+    if below_tier:
+        raise OnyxError(
+            OnyxErrorCode.FEATURE_NOT_AVAILABLE,
+            f"Token scope(s) not available on the {tier.value.title()} plan: "
+            f"{', '.join(s.value for s in below_tier)}",
+        )
+    if (
+        Permission.USE_LLM_GATEWAY in scopes
+        and not load_settings(raise_on_error=True).llm_gateway_enabled
+    ):
+        raise OnyxError(
+            OnyxErrorCode.INVALID_INPUT,
+            "The LLM gateway is disabled for this workspace.",
+        )
 
 
 @router.get("/scopes")
@@ -48,7 +66,23 @@ def list_selectable_scopes(
     _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> list[PatScopeOption]:
     """The scopes a user may assign when minting a token, with display metadata."""
-    return list(SELECTABLE_PAT_SCOPES.values())
+    tier = get_current_tier()
+    options: list[PatScopeOption] = [
+        option
+        for option in SELECTABLE_PAT_SCOPES.values()
+        if tier_at_least(tier, option.min_tier)
+    ]
+
+    # Read the switch only when it can change the result, so a settings
+    # outage cannot break the picker on plans without the gateway scope.
+    if (
+        any(option.scope == Permission.USE_LLM_GATEWAY for option in options)
+        and not load_settings(raise_on_error=True).llm_gateway_enabled
+    ):
+        options = [
+            option for option in options if option.scope != Permission.USE_LLM_GATEWAY
+        ]
+    return options
 
 
 @router.get("")
@@ -64,7 +98,7 @@ def list_tokens(
 @router.post("")
 def create_token(
     request: CreateTokenRequest,
-    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+    user: User = Depends(require_permission(Permission.CREATE_USER_API_KEYS)),
     db_session: Session = Depends(get_session),
 ) -> CreatedTokenResponse:
     """Create new personal access token for current user."""
@@ -83,7 +117,9 @@ def create_token(
 
     db_session.commit()
 
-    logger.info("User %s created PAT '%s'", user.email, request.name)
+    # %r escapes control chars in the user-supplied name so it can't forge log
+    # lines (CR/LF injection) in the shared log stream.
+    logger.info("User %s created PAT %r", user.email, request.name)
 
     return CreatedTokenResponse(
         **TokenResponse.model_validate(pat).model_dump(),
