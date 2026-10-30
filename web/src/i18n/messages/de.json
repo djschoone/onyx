@@ -1002,6 +1002,9 @@
         "canvas": {
           "description": "Kurse, Seiten und Ankündigungen"
         },
+        "osticket": {
+          "description": "Support-Tickets"
+        },
         "craftFile": {
           "description": "Von Ihnen hochgeladene Dateien"
         },

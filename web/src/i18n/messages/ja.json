@@ -1002,6 +1002,9 @@
         "canvas": {
           "description": "コース、ページ、お知らせ"
         },
+        "osticket": {
+          "description": "サポートチケット"
+        },
         "craftFile": {
           "description": "アップロードしたファイル"
         },

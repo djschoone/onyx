@@ -1002,6 +1002,9 @@
         "canvas": {
           "description": "الدورات والصفحات والإعلانات"
         },
+        "osticket": {
+          "description": "تذاكر الدعم"
+        },
         "craftFile": {
           "description": "الملفات التي رفعتها"
         },

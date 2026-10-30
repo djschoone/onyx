@@ -1002,6 +1002,9 @@
         "canvas": {
           "description": "课程、页面和公告"
         },
+        "osticket": {
+          "description": "支持工单"
+        },
         "craftFile": {
           "description": "你上传的文件"
         },

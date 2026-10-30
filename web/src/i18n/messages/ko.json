@@ -1002,6 +1002,9 @@
         "canvas": {
           "description": "강좌, 페이지, 공지"
         },
+        "osticket": {
+          "description": "지원 티켓"
+        },
         "craftFile": {
           "description": "업로드한 파일"
         },

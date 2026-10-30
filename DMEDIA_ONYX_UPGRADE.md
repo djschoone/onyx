@@ -35,6 +35,8 @@ Keep these when resolving conflicts:
 - `web/src/components/icons/icons.tsx` — `OsTicketIcon`
 - `web/src/lib/types.ts` — `ValidSources.OsTicket`
 - `web/src/lib/sources.ts` — `osticket` metadata
+- `web/src/lib/connectors/constants.ts` — `sources.osticket.description`
+- `web/src/i18n/messages/*.json` — catalog line for that key
 - `web/src/lib/connectors/connectors.tsx` — config form
 - `web/src/lib/connectors/types/connectorConfig.ts` — `OsTicketConfig`
 - `web/src/lib/connectors/credentials.ts` — `osticket_api_key` template
