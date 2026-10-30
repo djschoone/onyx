@@ -27,7 +27,8 @@ Keep these when resolving conflicts:
 
 - `backend/onyx/connectors/osticket/` (connector package)
 - `backend/onyx/configs/constants.py` — `DocumentSource.OSTICKET` (+ description map entry)
-- `backend/onyx/connectors/registry.py` — `DocumentSource.OSTICKET` mapping
+- `backend/onyx/connectors/registry.py` — `DocumentSource.OSTICKET` mapping, including `config_class`
+- `backend/onyx/connectors/osticket/config.py` — `OsTicketConnectorConfig` (fields match the connector `__init__`)
 
 **Frontend**
 

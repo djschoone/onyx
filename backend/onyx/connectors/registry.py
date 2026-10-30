@@ -44,6 +44,7 @@ from onyx.connectors.mediawiki.config import MediaWikiConnectorConfig
 from onyx.connectors.mock_connector.config import MockConnectorConfig
 from onyx.connectors.notion.config import NotionConnectorConfig
 from onyx.connectors.onedrive.config import OneDriveConnectorConfig
+from onyx.connectors.osticket.config import OsTicketConnectorConfig
 from onyx.connectors.outline.config import OutlineConnectorConfig
 from onyx.connectors.outlook.config import OutlookConnectorConfig
 from onyx.connectors.productboard.config import ProductboardConnectorConfig
@@ -357,6 +358,7 @@ CONNECTOR_CLASS_MAP = {
     DocumentSource.OSTICKET: ConnectorMapping(
         module_path="onyx.connectors.osticket.connector",
         class_name="OsTicketConnector",
+        config_class=OsTicketConnectorConfig,
     ),
     # just for integration tests
     DocumentSource.MOCK_CONNECTOR: ConnectorMapping(
