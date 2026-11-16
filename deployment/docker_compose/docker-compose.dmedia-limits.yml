@@ -23,7 +23,7 @@ services:
   background:
     cpus: "2.0"
     mem_limit: 4g
-    pids_limit: 256
+    pids_limit: 1024
 
   web_server:
     cpus: "0.75"
